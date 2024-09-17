@@ -1,0 +1,142 @@
+Here’s the Python 3.12 version of the code from the image you provided, along with in-line explanations for each part.
+
+# Import necessary libraries
+import boto3  # AWS SDK to interact with AWS services like Lambda and Organizations
+import os  # For interacting with the environment variables
+import sys  # Provides access to some variables used by the interpreter
+import traceback  # For extracting, formatting, and printing stack traces
+import json  # For working with JSON data
+import logging  # For logging messages
+from botocore.exceptions import ClientError  # For handling AWS-specific exceptions
+
+# Setting up logging
+LOGGER = logging.getLogger()  # Creating a logger object
+LOGGER.setLevel(logging.INFO)  # Setting the logging level to INFO
+
+# Setting critical logging for boto3 and botocore to avoid verbose output
+logging.getLogger('boto3').setLevel(logging.CRITICAL)
+logging.getLogger('botocore').setLevel(logging.CRITICAL)
+
+# Fetching Lambda function name from environment variables
+LAMBDA_HUB_FUNCTION_NAME = os.environ['LAMBDA_HUB_FUNCTION_NAME']
+
+# Function to get active AWS accounts using the Organizations API
+def get_org_accounts_list():
+    """
+    Retrieves a list of active AWS accounts from the Organizations service.
+    
+    :return: A list of active accounts with their respective account IDs.
+    """
+    try:
+        # Initialize the AWS Organizations client
+        organizations = boto3.client('organizations')
+        
+        # Paginator to handle large account lists by pages (20 per page)
+        paginator = organizations.get_paginator('list_accounts')
+        accounts = []
+        
+        # Paginate through each page of results
+        for page in paginator.paginate(PaginationConfig={'PageSize': 20}):
+            # Append only active accounts to the list
+            accounts += [acct['Id'] for acct in page['Accounts'] if acct['Status'] == 'ACTIVE']
+        
+        return accounts  # Return the list of active account IDs
+    except Exception as ex:
+        # Log the error and return an empty list if something goes wrong
+        LOGGER.error("Could not get the list of organizations accounts: ERROR: {}".format(ex))
+        return []  # Return empty list on failure
+
+# Lambda handler function (AWS Lambda entry point)
+def lambda_handler(event, context):
+    """
+    Lambda function handler that invokes another Lambda function for each active AWS account.
+    
+    :param event: The incoming event triggering the Lambda function.
+    :param context: Runtime information provided by AWS Lambda.
+    """
+    LOGGER.info("Lambda Handler - Start")  # Log when the Lambda handler starts
+    
+    # Retrieve the list of active accounts using the function above
+    accounts_list = get_org_accounts_list()
+    
+    LOGGER.info("List of accounts to deploy: {}".format(accounts_list))  # Log the accounts list
+
+    # Initialize the AWS Lambda client
+    lambda_client = boto3.client('lambda')
+    
+    # Iterate over each account and invoke the target Lambda function
+    for account in accounts_list:
+        try:
+            # Prepare the payload for invoking the Lambda function
+            msg = json.dumps({
+                "account": account  # Pass the account ID in the payload
+            })
+            
+            # Invoke the target Lambda function asynchronously with 'Event' invocation type
+            invoke_response = lambda_client.invoke(
+                FunctionName=LAMBDA_HUB_FUNCTION_NAME,  # Function name from environment variable
+                InvocationType='Event',  # Asynchronous invocation
+                Payload=msg  # Payload with account information
+            )
+            
+            # Log the invocation response
+            print(invoke_response)
+        
+        # Handle any exceptions that occur during the Lambda invocation
+        except Exception as exp:
+            exception_type, exception_value, exception_traceback = sys.exc_info()  # Capture exception details
+            traceback_string = traceback.format_exception(exception_type, exception_value, exception_traceback)  # Format stack trace
+            
+            # Log the error with exception type, message, and stack trace
+            err_msg = json.dumps({
+                "errorType": exception_type.__name__,  # Exception type name
+                "errorMessage": str(exception_value),  # Exception message
+                "stackTrace": traceback_string  # Formatted stack trace
+            })
+            
+            LOGGER.error(err_msg)  # Log the error message
+            
+    # Return a success status after processing all accounts
+    return {
+        "status": "success",
+        "message": "Lambda executions triggered for all active accounts"
+    }
+
+Key Sections and Explanations:
+
+	1.	Imports:
+	•	boto3: AWS SDK to interact with AWS services like Lambda and Organizations.
+	•	os: For accessing environment variables.
+	•	sys: Used to fetch details of exceptions during error handling.
+	•	traceback: To generate and format stack traces in case of exceptions.
+	•	json: For handling JSON objects, especially for payloads and logging.
+	•	logging: For logging messages at various stages of execution.
+	•	ClientError: Exception class for handling AWS service-specific errors.
+	2.	Logging Setup:
+	•	Logging is set to INFO level for general logs, and critical logging is enabled for boto3 and botocore to avoid verbose outputs from these libraries.
+	3.	Get Active Accounts Function:
+	•	get_org_accounts_list(): Retrieves a list of active AWS accounts from AWS Organizations using the list_accounts API.
+	•	Pagination: Handles large numbers of accounts by paginating in chunks of 20.
+	•	Logs an error if the API call fails and returns an empty list.
+	4.	Lambda Handler:
+	•	The main function that gets triggered by AWS Lambda. It:
+	•	Retrieves the list of active accounts using get_org_accounts_list().
+	•	Logs the list of active accounts to be processed.
+	•	Uses the Lambda client to invoke another Lambda function (asynchronously) for each account.
+	5.	Lambda Invocation:
+	•	For each active account, the Lambda function is invoked using lambda_client.invoke().
+	•	The payload consists of the account ID, and it uses InvocationType='Event' for asynchronous invocation, meaning the calling Lambda doesn’t wait for the invoked function to complete.
+	•	The function name to invoke is retrieved from an environment variable, LAMBDA_HUB_FUNCTION_NAME.
+	6.	Error Handling:
+	•	If an error occurs during the Lambda invocation, detailed exception information is captured using sys.exc_info() and formatted with traceback.format_exception().
+	•	Logs include the error type, message, and stack trace in JSON format for easier debugging.
+	7.	Return Statement:
+	•	After all the invocations are triggered, the function returns a success status with the message “Lambda executions triggered for all active accounts”.
+
+Differences in Python 3.12:
+
+	•	Error Handling: Python 3.12 includes improved error messages, but no specific changes are needed in this code to take advantage of them.
+	•	Structural Pattern Matching: Python 3.12 introduces pattern matching, but the structure of this code doesn’t benefit from it since it deals with straightforward exception handling and iteration.
+	•	Performance: Python 3.12’s general performance improvements will apply, but no code changes are necessary to leverage them.
+
+This code is now adapted for Python 3.12 and ready to run. If you need any additional details or adjustments, feel free to ask!
