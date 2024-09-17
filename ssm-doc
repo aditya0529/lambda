@@ -1,0 +1,97 @@
+# Importing necessary libraries
+import json  # For handling JSON data
+import logging  # For logging error and info messages
+import re  # For regular expressions, though not used in the visible code
+import os  # For accessing environment variables
+import boto3  # AWS SDK for Python, used to interact with AWS services
+
+# Set up logging
+LOGGER = logging.getLogger()
+
+# Fetch the enabled regions from the environment variable, default to an empty string if not found
+ENABLED_REGIONS = os.environ.get("ENABLED_REGIONS", "")
+
+# Check if ENABLED_REGIONS is valid (should be a non-empty string), else raise an error
+if not isinstance(ENABLED_REGIONS, str) or not ENABLED_REGIONS:
+    raise ValueError("ENABLED REGIONS missing or invalid")
+
+# Define some constants
+settings_id = 'account-settings/console/public-sharing-permission'  # ID for the service setting
+SLEEP_SECONDS = 200  # Delay value for certain operations (likely throttling)
+HTTPSTS_STATUS_CODE_SUCCESS = 200  # HTTP status code for success
+
+# Function to retrieve service settings from AWS Systems Manager (SSM)
+def get_service_settings(ssm_client, region_name):
+    """
+    This function fetches the service setting from SSM for a given region.
+    
+    :param ssm_client: The boto3 client for AWS SSM.
+    :param region_name: The AWS region name where the setting is fetched.
+    :return: The service setting's status for the given account.
+    """
+    try:
+        # Fetch the service setting using the Systems Manager API
+        ssm_doc_response = ssm_client.get_service_setting(ServiceSettingId=settings_id)
+        return ssm_doc_response['ServiceSetting']['SettingValue']
+    except Exception as ex:
+        # If any exception occurs, log the error and raise a ValueError
+        LOGGER.error(f"Error getting the service setting {ex}")
+        raise ValueError(f"Error getting service setting {ex}")
+
+# Function to update service settings in AWS SSM
+def update_service_settings(ssm_client, account_id, setting_value):
+    """
+    This function updates the service setting to disable public sharing for the account.
+    
+    :param ssm_client: The boto3 client for AWS SSM.
+    :param account_id: The AWS account ID for which the setting is being updated.
+    :param setting_value: The new value to set for public sharing (e.g., 'Disable').
+    """
+    try:
+        # Updating the service setting with the new value ('Disable' in this case)
+        response = ssm_client.update_service_setting(
+            ServiceSettingId=settings_id,
+            SettingValue=setting_value
+        )
+        # Check if the update was successful by comparing status codes
+        if response['HTTPStatusCode'] == HTTPSTS_STATUS_CODE_SUCCESS:
+            LOGGER.info(f"Successfully disabled public sharing for account {account_id}")
+        else:
+            LOGGER.error(f"Failed to disable public sharing for account {account_id}. Status code: {response['HTTPStatusCode']}")
+    except Exception as ex:
+        LOGGER.error(f"Error updating the service setting {ex}")
+        raise ValueError(f"Error updating service setting {ex}")
+
+# Lambda handler function (AWS Lambda function entry point)
+def lambda_handler(event, context):
+    """
+    The Lambda handler function that processes the event and context from AWS Lambda.
+    
+    :param event: The incoming event data triggering the Lambda function.
+    :param context: Runtime information provided by AWS Lambda.
+    :return: A JSON response indicating success or failure.
+    """
+    account_id = context.invoked_function_arn.split(":")[4]  # Extract the account ID from the ARN
+
+    # Split the ENABLED_REGIONS string into a list of regions
+    regions_list = ENABLED_REGIONS.split(",")
+
+    # Initialize the SSM client (using boto3) for each region
+    ssm_client = boto3.client('ssm', region_name='us-east-1')  # Example for a default region
+
+    for region in regions_list:
+        LOGGER.info(f"Processing region: {region}")
+        regional_service_setting = get_service_settings(ssm_client, region)
+
+        # If the service setting is not already 'Disable', update it
+        if regional_service_setting != 'Disable':
+            LOGGER.info(f"Service Setting is {regional_service_setting} for account {account_id} in region {region}")
+            update_service_settings(ssm_client, account_id, 'Disable')
+        else:
+            LOGGER.info(f"Service Setting is already disabled for account {account_id} in region {region}")
+    
+    # Return a success response when the Lambda function finishes execution
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Completed Disabling SSM Doc Public Sharing Service Setting!')
+    }
