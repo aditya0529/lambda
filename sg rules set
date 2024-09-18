@@ -11,75 +11,29 @@ def handler(event, context):
     logger.info(f"Input Event: {json.dumps(event)}")
 
     try:
-        # Check if the event is from CloudFormation
-        if 'StackId' in event and 'LogicalResourceId' in event:
-            logger.info("CloudFormation invocation detected")
-
-            # Handle CloudFormation requests (specifically on Create or Update)
-            if event['RequestType'] in ['Create', 'Update']:
-                ec2_client = boto3.client('ec2')
-                props = event['ResourceProperties']
-                logger.info(f"Received props: {json.dumps(props)}")
-                
-                try:
-                    response = ec2_client.describe_security_groups(
-                        Filters=[{'Name': 'group-name', 'Values': ['default']}]
-                    )
-                    logger.info(f"Response from describe_security_groups: {response}")
-                    
-                    security_groups = response['SecurityGroups']
-                    for sg in security_groups:
-                        if sg['GroupName'] == 'default' and len(sg['IpPermissions']) > 0:
-                            response = ec2_client.revoke_security_group_egress(
-                                GroupId=sg['GroupId'],
-                                IpPermissions=[{'IpProtocol': '-1', 'IpRanges': []}]
-                            )
-                            logger.info(f"Security group egress rule revoked for group: {sg['GroupId']}")
-                        else:
-                            logger.info(f"No egress rules to revoke for group: {sg['GroupId']}")
-                    
-                    # Send success response back to CloudFormation if it's a create/update request
-                    if 'ResponseURL' in event:
-                        import cfresponse
-                        cfresponse.send(event, context, cfresponse.SUCCESS, {})
-                    else:
-                        logger.warning("CloudFormation ResponseURL not found, skipping cfresponse")
-                
-                except KeyError as e:
-                    logger.error(f"KeyError encountered: {str(e)}")
-                    if 'ResponseURL' in event:
-                        cfresponse.send(event, context, cfresponse.FAILED, {'Message': f"KeyError: {str(e)}"})
-                    return
-                except Exception as ex:
-                    logger.error(f"Exception encountered: {str(ex)}")
-                    if 'ResponseURL' in event:
-                        cfresponse.send(event, context, cfresponse.FAILED, {'Message': str(ex)})
-                    return
-                
-            # Handle deletion requests
-            elif event['RequestType'] == 'Delete':
-                logger.info("Skipping deletion action as it's a delete request")
-                if 'ResponseURL' in event:
-                    cfresponse.send(event, context, cfresponse.SUCCESS, {})
-                return
-
-        # For non-CloudFormation invocations, proceed normally
+        # Your existing code logic here
+        
+        # Check if 'ResponseURL' exists in the event (CloudFormation request)
+        if 'ResponseURL' in event:
+            # CloudFormation logic with cfresponse
+            import cfresponse
+            logger.info("CloudFormation invocation detected, using cfresponse")
+            # Your logic with cfresponse
+            cfresponse.send(event, context, cfresponse.SUCCESS, {})
         else:
-            logger.info("Non-CloudFormation invocation detected, proceeding without cfresponse")
-            ec2_client = boto3.client('ec2')
-            # Usual Lambda processing here for non-CloudFormation invocations
-
-    except KeyError as e:
-        logger.error(f"KeyError encountered: {str(e)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps(f"KeyError: {str(e)}")
-        }
+            # Non-CloudFormation logic (no ResponseURL)
+            logger.info("Non-CloudFormation invocation, skipping cfresponse")
+            # Your normal logic without cfresponse
+        
     except Exception as ex:
-        logger.error(f"Unexpected exception encountered: {str(ex)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps(f"Error: {str(ex)}")
-        }
+        logger.error(f"Exception encountered: {str(ex)}")
+        if 'ResponseURL' in event:
+            import cfresponse
+            cfresponse.send(event, context, cfresponse.FAILED, {'Message': str(ex)})
+        else:
+            return {
+                'statusCode': 500,
+                'body': json.dumps(f"Error: {str(ex)}")
+            }
 
     logger.info("Handler execution completed")
