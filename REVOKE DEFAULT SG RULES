@@ -43,6 +43,7 @@ from botocore.exceptions import ClientError
 import logging
 import os
 
+# Set up logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', logging.INFO)
 logger = logging.getLogger()
 logger.setLevel(LOG_LEVEL)
@@ -51,61 +52,131 @@ def handler(event, context):
     logger.info(f"Input Event: {json.dumps(event)}")
 
     try:
-        StackName = event['StackId']
-        LogicalResourceId = event['LogicalResourceId']
-        UniqueId = event['RequestId']
+        # Check if this is a CloudFormation invocation (StackId, LogicalResourceId, and RequestId)
+        if 'StackId' in event and 'LogicalResourceId' in event and 'RequestId' in event:
+            # This is a CloudFormation invocation
+            logger.info("CloudFormation invocation detected")
 
-        props = event['ResourceProperties']
-        client = boto3.client('ec2')
-        get_sg = client.describe_security_groups(
-            Filters=[{"Name": "group-name", "Values": ["default"]}]
-        )
+            StackName = event['StackId']  # The CloudFormation Stack ID
+            LogicalResourceId = event['LogicalResourceId']  # Logical Resource ID in the stack
+            UniqueId = event['RequestId']  # Unique request ID for this CloudFormation request
+            props = event['ResourceProperties']  # Resource properties provided by CloudFormation
 
-        logger.info(f"Response from describe_security_groups call: {get_sg}")
+            logger.info(f"CloudFormation StackId: {StackName}, LogicalResourceId: {LogicalResourceId}, RequestId: {UniqueId}")
+            logger.info(f"CloudFormation Resource Properties: {json.dumps(props)}")
 
-        account_id = context.invoked_function_arn.split(":")[4]
-        for sg in get_sg['SecurityGroups']:
-            if sg['GroupName'] == "default":
-                if len(sg['IpPermissions']) > 0:
-                    response = client.revoke_security_group_egress(
-                        GroupId=sg['GroupId'],
-                        IpPermissions=[{
-                            'IpProtocol': '-1',
-                            'IpRanges': [],
-                            'PrefixListIds': [],
-                            'UserIdGroupPairs': [{
-                                'GroupId': sg['GroupId'],
-                                'UserId': account_id
+            # AWS EC2 client to interact with security groups
+            client = boto3.client('ec2')
+            get_sg = client.describe_security_groups(Filters=[{"Name": "group-name", "Values": ["default"]}])
+
+            logger.info(f"Response from describe_security_groups call: {get_sg}")
+
+            account_id = context.invoked_function_arn.split(":")[4]
+
+            # Process the default security group
+            for sg in get_sg['SecurityGroups']:
+                if sg['GroupName'] == "default":
+                    # Revoke egress rules if present
+                    if len(sg['IpPermissions']) > 0:
+                        response = client.revoke_security_group_egress(
+                            GroupId=sg['GroupId'],
+                            IpPermissions=[{
+                                'IpProtocol': '-1',
+                                'IpRanges': [],
+                                'PrefixListIds': [],
+                                'UserIdGroupPairs': [{
+                                    'GroupId': sg['GroupId'],
+                                    'UserId': account_id
+                                }]
                             }]
-                        }]
-                    )
-                    logger.info(f"Response from revoke_security_group_egress call: {response}")
-                if len(sg['IpPermissionsEgress']) > 0:
-                    response = client.revoke_security_group_ingress(
-                        GroupId=sg['GroupId'],
-                        IpPermissions=[{
-                            'IpProtocol': '-1',
-                            'IpRanges': [],
-                            'PrefixListIds': [],
-                            'UserIdGroupPairs': [{
-                                'GroupId': sg['GroupId'],
-                                'UserId': account_id
+                        )
+                        logger.info(f"Response from revoke_security_group_egress call: {response}")
+
+                    # Revoke ingress rules if present
+                    if len(sg['IpPermissionsEgress']) > 0:
+                        response = client.revoke_security_group_ingress(
+                            GroupId=sg['GroupId'],
+                            IpPermissions=[{
+                                'IpProtocol': '-1',
+                                'IpRanges': [],
+                                'PrefixListIds': [],
+                                'UserIdGroupPairs': [{
+                                    'GroupId': sg['GroupId'],
+                                    'UserId': account_id
+                                }]
                             }]
-                        }]
-                    )
-                    logger.info(f"Response from revoke_security_group_ingress call: {response}")
+                        )
+                        logger.info(f"Response from revoke_security_group_ingress call: {response}")
 
-        logger.info(f"Completion of default security group update for {sg['GroupId']}")
+            logger.info(f"Completed default security group update for {sg['GroupId']}")
 
-        if event['RequestType'] == 'Delete':
-            logger.info("Skipping deletion action")
-        else:
-            if 'ResponseURL' in event:
-                cfresponse.send(event, context, cfresponse.SUCCESS, {})
+            # Check the CloudFormation RequestType (e.g., Create, Update, Delete)
+            if event['RequestType'] == 'Delete':
+                logger.info("Skipping deletion action")
             else:
-                logger.info("Normal invocation without CloudFormation response URL")
+                # Send a success response to CloudFormation if 'ResponseURL' is present
+                if 'ResponseURL' in event:
+                    cfresponse.send(event, context, cfresponse.SUCCESS, {})
+                else:
+                    logger.warning("CloudFormation ResponseURL not provided, skipping cfresponse.")
+
+        # Handle non-CloudFormation invocation (standard Lambda invoke)
+        else:
+            logger.info("Normal Lambda invocation detected")
+
+            client = boto3.client('ec2')
+            get_sg = client.describe_security_groups(Filters=[{"Name": "group-name", "Values": ["default"]}])
+
+            logger.info(f"Response from describe_security_groups call: {get_sg}")
+
+            account_id = context.invoked_function_arn.split(":")[4]
+
+            # Process the default security group in a normal invocation
+            for sg in get_sg['SecurityGroups']:
+                if sg['GroupName'] == "default":
+                    # Revoke egress rules if present
+                    if len(sg['IpPermissions']) > 0:
+                        response = client.revoke_security_group_egress(
+                            GroupId=sg['GroupId'],
+                            IpPermissions=[{
+                                'IpProtocol': '-1',
+                                'IpRanges': [],
+                                'PrefixListIds': [],
+                                'UserIdGroupPairs': [{
+                                    'GroupId': sg['GroupId'],
+                                    'UserId': account_id
+                                }]
+                            }]
+                        )
+                        logger.info(f"Response from revoke_security_group_egress call: {response}")
+
+                    # Revoke ingress rules if present
+                    if len(sg['IpPermissionsEgress']) > 0:
+                        response = client.revoke_security_group_ingress(
+                            GroupId=sg['GroupId'],
+                            IpPermissions=[{
+                                'IpProtocol': '-1',
+                                'IpRanges': [],
+                                'PrefixListIds': [],
+                                'UserIdGroupPairs': [{
+                                    'GroupId': sg['GroupId'],
+                                    'UserId': account_id
+                                }]
+                            }]
+                        )
+                        logger.info(f"Response from revoke_security_group_ingress call: {response}")
+
+            logger.info(f"Completed default security group update for {sg['GroupId']}")
 
     except Exception as ex:
-        logger.info(f"Failed executing: {str(ex)}")
+        logger.error(f"Failed executing: {str(ex)}", exc_info=True)
+        # Send failure response to CloudFormation if 'ResponseURL' exists
         if 'ResponseURL' in event:
             cfresponse.send(event, context, cfresponse.FAILED, str(ex))
+        # Return error response for non-CloudFormation invocations
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'message': f"Error occurred: {str(ex)}"
+            })
+        }
