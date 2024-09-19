@@ -1,0 +1,111 @@
+Here’s an overview of how this Lambda function works and the types of events that trigger it:
+
+Key Elements:
+
+	•	Request Type: The function checks the value of the RequestType field in the event object. This field is commonly included when CloudFormation invokes a Lambda function. It can have values like Create, Update, or Delete.
+	•	Create: This is triggered when a new CloudFormation stack is being created.
+	•	Update: This is triggered when an existing stack is being updated.
+	•	Delete: This is triggered when a stack is being deleted.
+	•	Stack-specific Event Data:
+	•	The function extracts information such as StackId, LogicalResourceId, and RequestId, which are specific to the CloudFormation stack. These fields ensure that the Lambda function can identify the stack it is working with.
+	•	CloudFormation Actions:
+	•	Based on the request type (e.g., Create, Update, Delete), the Lambda function performs actions such as revoking security group egress rules using the AWS EC2 client (boto3.client('ec2')).
+	•	The Lambda also processes the ResourceProperties field, which is typically included in CloudFormation templates and holds resource-specific data.
+
+Triggering Events:
+
+	•	This Lambda function will only trigger in response to CloudFormation events because it relies on CloudFormation-specific fields such as RequestType, StackId, and LogicalResourceId.
+	•	It is most likely associated with a specific CloudFormation resource type or custom resource defined in a template. This means the function will be invoked when a CloudFormation template that includes this Lambda function (as a resource or custom resource) is deployed, updated, or deleted.
+
+Example Use Cases:
+
+	•	CloudFormation Stack Creation (Create): The Lambda will be invoked when a new stack that includes this Lambda function in the template is created.
+	•	CloudFormation Stack Update (Update): The Lambda will be triggered when an existing stack (which references this function) is updated.
+	•	CloudFormation Stack Deletion (Delete): The Lambda will handle the cleanup tasks (like removing egress rules) when the CloudFormation stack is deleted.
+
+Conclusion:
+
+	•	This Lambda function is designed to trigger only when a CloudFormation stack that includes it (as a resource or custom resource) is created, updated, or deleted.
+	•	It will not trigger for general CloudFormation templates unless the specific stack contains this Lambda function as part of the deployment.
+
+Let me know if you need more details or have further questions!
+
+
+----------------
+
+
+
+
+
+import sys, json, boto3
+import cfresponse
+from botocore.exceptions import ClientError
+import logging
+import os
+
+LOG_LEVEL = os.getenv('LOG_LEVEL', logging.INFO)
+logger = logging.getLogger()
+logger.setLevel(LOG_LEVEL)
+
+def handler(event, context):
+    logger.info(f"Input Event: {json.dumps(event)}")
+
+    try:
+        StackName = event['StackId']
+        LogicalResourceId = event['LogicalResourceId']
+        UniqueId = event['RequestId']
+
+        props = event['ResourceProperties']
+        client = boto3.client('ec2')
+        get_sg = client.describe_security_groups(
+            Filters=[{"Name": "group-name", "Values": ["default"]}]
+        )
+
+        logger.info(f"Response from describe_security_groups call: {get_sg}")
+
+        account_id = context.invoked_function_arn.split(":")[4]
+        for sg in get_sg['SecurityGroups']:
+            if sg['GroupName'] == "default":
+                if len(sg['IpPermissions']) > 0:
+                    response = client.revoke_security_group_egress(
+                        GroupId=sg['GroupId'],
+                        IpPermissions=[{
+                            'IpProtocol': '-1',
+                            'IpRanges': [],
+                            'PrefixListIds': [],
+                            'UserIdGroupPairs': [{
+                                'GroupId': sg['GroupId'],
+                                'UserId': account_id
+                            }]
+                        }]
+                    )
+                    logger.info(f"Response from revoke_security_group_egress call: {response}")
+                if len(sg['IpPermissionsEgress']) > 0:
+                    response = client.revoke_security_group_ingress(
+                        GroupId=sg['GroupId'],
+                        IpPermissions=[{
+                            'IpProtocol': '-1',
+                            'IpRanges': [],
+                            'PrefixListIds': [],
+                            'UserIdGroupPairs': [{
+                                'GroupId': sg['GroupId'],
+                                'UserId': account_id
+                            }]
+                        }]
+                    )
+                    logger.info(f"Response from revoke_security_group_ingress call: {response}")
+
+        logger.info(f"Completion of default security group update for {sg['GroupId']}")
+
+        if event['RequestType'] == 'Delete':
+            logger.info("Skipping deletion action")
+        else:
+            if 'ResponseURL' in event:
+                cfresponse.send(event, context, cfresponse.SUCCESS, {})
+            else:
+                logger.info("Normal invocation without CloudFormation response URL")
+
+    except Exception as ex:
+        logger.info(f"Failed executing: {str(ex)}")
+        if 'ResponseURL' in event:
+            cfresponse.send(event, context, cfresponse.FAILED, str(ex))
