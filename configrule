@@ -1,0 +1,526 @@
+Step 1: Overview
+AWS Config Rule: AWS Config monitors AWS resource configurations and invokes the Lambda function whenever SNS configuration changes.
+Lambda Function: The function checks SNS subscriptions and evaluates if email subscriptions are compliant with the specified domain.
+IAM Roles:
+Role for AWS Config to invoke the Lambda function.
+Role for Lambda to access SNS resources.
+Step 2: AWS Config Rule
+AWS Config rule configuration will invoke a Lambda function to check compliance.
+
+AWS Config Rule YAML Definition
+Here is the AWS CloudFormation template snippet that defines the AWS Config rule:
+
+yaml
+Copy code
+Resources:
+  SNSDomainComplianceRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: sns-email-domain-compliance
+      Description: Checks if SNS email subscriptions match the specified company domain.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt CheckSNSEmailDomainFunction.Arn
+      InputParameters:
+        AllowedDomain: "@yourcompany.com"  # Change this to your company's domain
+      MaximumExecutionFrequency: TwentyFour_Hours
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::SNS::Topic"
+Step 3: Lambda Function
+The Lambda function will evaluate the compliance of SNS email subscriptions based on the allowed domain.
+
+Lambda Function Code
+Here’s the complete code for the Lambda function:
+
+python
+Copy code
+import boto3
+import json
+import os
+
+# Get allowed domain from environment variables (set in AWS Config Rule parameters)
+ALLOWED_DOMAIN = os.getenv('AllowedDomain', '@yourcompany.com')  # Default to '@yourcompany.com'
+
+# Initialize SNS client
+sns_client = boto3.client('sns')
+
+def evaluate_compliance(sns_topic_arn):
+    """
+    Evaluates if all email subscriptions for the given SNS topic match the allowed domain.
+    """
+    response = sns_client.list_subscriptions_by_topic(TopicArn=sns_topic_arn)
+    subscriptions = response.get('Subscriptions', [])
+
+    for subscription in subscriptions:
+        protocol = subscription.get('Protocol')
+        endpoint = subscription.get('Endpoint', '')
+
+        # Check if the protocol is email and does not match the allowed domain
+        if protocol == 'email' and not endpoint.endswith(ALLOWED_DOMAIN):
+            return 'NON_COMPLIANT'
+
+    return 'COMPLIANT'
+
+def lambda_handler(event, context):
+    # Parse AWS Config invoking event
+    invoking_event = json.loads(event['invokingEvent'])
+    sns_topic_arn = invoking_event['configurationItem']['arn']
+
+    # Evaluate the compliance of the SNS topic
+    compliance_type = evaluate_compliance(sns_topic_arn)
+
+    # Send evaluation result back to AWS Config
+    config_client = boto3.client('config')
+    config_client.put_evaluations(
+        Evaluations=[
+            {
+                'ComplianceResourceType': invoking_event['configurationItem']['resourceType'],
+                'ComplianceResourceId': invoking_event['configurationItem']['resourceId'],
+                'ComplianceType': compliance_type,
+                'Annotation': f"SNS Topic {sns_topic_arn} has non-compliant email subscription(s).",
+                'OrderingTimestamp': invoking_event['configurationItem']['configurationItemCaptureTime']
+            },
+        ],
+        ResultToken=event['resultToken']
+    )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Compliance evaluation completed.')
+    }
+Lambda Function Explanation:
+evaluate_compliance(): This function checks if each email subscription on the SNS topic matches the allowed domain.
+lambda_handler(): Handles events from AWS Config, evaluates compliance, and sends the results back to AWS Config.
+Step 4: IAM Roles
+IAM Role for AWS Config to Invoke Lambda:
+yaml
+Copy code
+Resources:
+  ConfigInvokeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+IAM Role for Lambda to Access SNS and AWS Config:
+yaml
+Copy code
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaSNSSNSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:ListSubscriptionsByTopic
+                  - config:PutEvaluations
+                Resource: "*"
+Step 5: Full CloudFormation Template
+Here's the full CloudFormation template incorporating the AWS Config Rule, Lambda function, and IAM roles:
+
+yaml
+Copy code
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  SNSDomainComplianceRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: sns-email-domain-compliance
+      Description: Checks if SNS email subscriptions match the specified company domain.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt CheckSNSEmailDomainFunction.Arn
+      InputParameters:
+        AllowedDomain: "@yourcompany.com"  # Set your company domain
+      MaximumExecutionFrequency: TwentyFour_Hours
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::SNS::Topic"
+
+  CheckSNSEmailDomainFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          # (Place the Lambda function code here as shown earlier)
+      Environment:
+        Variables:
+          AllowedDomain: "@yourcompany.com"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaSNSSNSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:ListSubscriptionsByTopic
+                  - config:PutEvaluations
+                Resource: "*"
+
+  ConfigInvokeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+Explanation of Resources:
+SNSDomainComplianceRule: Config rule that invokes the Lambda function to check compliance.
+CheckSNSEmailDomainFunction: Lambda function that evaluates SNS topic compliance with your domain policy.
+IAM Roles:
+LambdaExecutionRole: Allows the Lambda function to access SNS and report back to AWS Config.
+ConfigInvokeLambdaRole: Allows AWS Config to invoke the Lambda function.
+Conclusion
+This CloudFormation template sets up a comprehensive AWS Config rule with a Lambda function to detect SNS email subscriptions not matching the specified company domain, including all necessary IAM roles and permissions.
+
+
+
+
+
+
+------------
+
+Performance Optimization Strategies:
+Batch Processing with Pagination:
+
+Use pagination to handle large lists of SNS topics and subscriptions efficiently.
+Reduce API calls by using pagination correctly when listing subscriptions.
+Parallel Processing:
+
+Utilize Python's concurrent.futures to evaluate multiple topics concurrently, reducing the total evaluation time.
+Efficient Data Structures:
+
+Use Python sets and dictionaries for quick lookups and checks, minimizing overhead.
+Error Handling and Logging:
+
+Add proper error handling to avoid stopping the evaluation due to one failed topic and ensure logging is minimal to prevent performance degradation.
+Here's the optimized Lambda function code with performance improvements:
+
+Optimized Lambda Function Code
+python
+Copy code
+import boto3
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Define the allowed domain for email subscriptions
+ALLOWED_DOMAIN = os.getenv('AllowedDomain', '@yourcompany.com')  # Change this to your company's domain
+
+# Initialize SNS client
+sns_client = boto3.client('sns')
+
+def evaluate_compliance(sns_topic_arn):
+    """
+    Evaluates whether all email subscriptions for a given SNS topic match the allowed domain.
+    Returns 'COMPLIANT' or 'NON_COMPLIANT'.
+    """
+    try:
+        subscriptions = []
+        next_token = None
+
+        # Paginate through subscriptions for the topic
+        while True:
+            response = sns_client.list_subscriptions_by_topic(TopicArn=sns_topic_arn, NextToken=next_token)
+            subscriptions.extend(response.get('Subscriptions', []))
+            next_token = response.get('NextToken')
+            if not next_token:
+                break
+
+        # Evaluate each subscription endpoint
+        for subscription in subscriptions:
+            protocol = subscription.get('Protocol')
+            endpoint = subscription.get('Endpoint', '')
+
+            # Check if the subscription is an email and does not match the allowed domain
+            if protocol == 'email' and not endpoint.endswith(ALLOWED_DOMAIN):
+                return 'NON_COMPLIANT'
+
+        return 'COMPLIANT'
+
+    except Exception as e:
+        # Log error and return non-compliant status if there's an issue with evaluation
+        print(f"Error evaluating {sns_topic_arn}: {e}")
+        return 'NON_COMPLIANT'
+
+def lambda_handler(event, context):
+    # Parse the AWS Config invoking event
+    invoking_event = json.loads(event['invokingEvent'])
+    sns_topic_arns = extract_sns_topics(invoking_event)  # Custom function to extract relevant SNS ARNs
+
+    # Use ThreadPoolExecutor to evaluate multiple topics concurrently
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(evaluate_compliance, arn): arn for arn in sns_topic_arns}
+
+        # Prepare evaluations to send back to AWS Config
+        evaluations = []
+        for future in as_completed(futures):
+            sns_topic_arn = futures[future]
+            compliance_type = future.result()
+
+            evaluations.append({
+                'ComplianceResourceType': 'AWS::SNS::Topic',
+                'ComplianceResourceId': sns_topic_arn.split(':')[-1],
+                'ComplianceType': compliance_type,
+                'Annotation': f"SNS Topic {sns_topic_arn} has non-compliant email subscription(s)." if compliance_type == 'NON_COMPLIANT' else "Compliant.",
+                'OrderingTimestamp': invoking_event['notificationCreationTime']
+            })
+
+        # Send evaluation results back to AWS Config
+        config_client = boto3.client('config')
+        config_client.put_evaluations(
+            Evaluations=evaluations,
+            ResultToken=event['resultToken']
+        )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Compliance evaluation completed.')
+    }
+
+def extract_sns_topics(invoking_event):
+    """
+    Extracts SNS topic ARNs from the invoking event.
+    Modify this function based on the actual structure of the AWS Config event.
+    """
+    configuration_items = invoking_event.get('configurationItem', [])
+    sns_topic_arns = []
+
+    # Example of extracting SNS topic ARNs - adjust based on actual event structure
+    if configuration_items:
+        sns_topic_arns.append(configuration_items.get('arn'))
+
+    return sns_topic_arns
+Key Changes and Optimizations:
+Concurrent Evaluation:
+
+Uses ThreadPoolExecutor to evaluate multiple SNS topics in parallel, greatly improving performance when dealing with large numbers of topics.
+Efficient Pagination:
+
+Handles pagination using NextToken when listing subscriptions to manage large datasets effectively without missing any subscriptions.
+Error Handling:
+
+Improved error handling ensures that the evaluation process continues even if errors occur with specific topics.
+Optimized Logging:
+
+Minimal logging within concurrent processes to avoid performance hits due to excessive I/O operations.
+IAM Role Updates for Lambda:
+The Lambda execution role remains similar but may need increased permission scopes to handle multiple API calls efficiently.
+
+yaml
+Copy code
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaSNSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTopics
+                  - config:PutEvaluations
+                Resource: "*"
+Summary:
+The updated Lambda function uses concurrent processing to handle multiple SNS topics efficiently.
+The ThreadPoolExecutor allows the function to evaluate several topics simultaneously, which is crucial for large environments.
+Pagination ensures that all subscriptions are evaluated without missing any due to API limits.
+This approach significantly enhances the performance of the compliance checks, making it suitable for larger AWS environments with many SNS topics.
+
+
+
+  ---------------
+
+
+
+  import boto3  # AWS SDK for Python to interact with AWS services
+import json  # Library for parsing and handling JSON data
+import os  # Provides a way to interact with the operating system
+from concurrent.futures import ThreadPoolExecutor, as_completed  # For parallel execution of tasks
+
+# Define the allowed domain for email subscriptions, fetched from environment variables or set to a default value
+ALLOWED_DOMAIN = os.getenv('AllowedDomain', '@yourcompany.com')  # Change this to your company's domain
+
+# Initialize the SNS client to interact with SNS services
+sns_client = boto3.client('sns')
+
+def evaluate_compliance(sns_topic_arn):
+    """
+    Evaluates whether all email subscriptions for a given SNS topic match the allowed domain.
+    Returns 'COMPLIANT' if all subscriptions match the domain, otherwise 'NON_COMPLIANT'.
+    """
+    try:
+        subscriptions = []  # Initialize an empty list to hold subscriptions
+        next_token = None  # Token to manage pagination when listing subscriptions
+
+        # Paginate through subscriptions for the topic
+        while True:
+            # List subscriptions by topic with pagination support
+            response = sns_client.list_subscriptions_by_topic(TopicArn=sns_topic_arn, NextToken=next_token)
+            # Append the current batch of subscriptions to the list
+            subscriptions.extend(response.get('Subscriptions', []))
+            # Get the next token to fetch the next set of results
+            next_token = response.get('NextToken')
+            # Break the loop if there are no more subscriptions to fetch
+            if not next_token:
+                break
+
+        # Evaluate each subscription's protocol and endpoint
+        for subscription in subscriptions:
+            protocol = subscription.get('Protocol')  # Get the protocol of the subscription (e.g., 'email')
+            endpoint = subscription.get('Endpoint', '')  # Get the subscription endpoint (email address)
+
+            # Check if the subscription is an email and does not match the allowed domain
+            if protocol == 'email' and not endpoint.endswith(ALLOWED_DOMAIN):
+                return 'NON_COMPLIANT'  # Return non-compliant if an endpoint does not match the allowed domain
+
+        # If all subscriptions are compliant, return COMPLIANT
+        return 'COMPLIANT'
+
+    except Exception as e:
+        # Log error if there's an issue with evaluating the SNS topic, but continue processing
+        print(f"Error evaluating {sns_topic_arn}: {e}")
+        return 'NON_COMPLIANT'  # Default to non-compliant in case of an error to ensure safety
+
+def lambda_handler(event, context):
+    # Parse the AWS Config invoking event to extract necessary details
+    invoking_event = json.loads(event['invokingEvent'])  # Convert the JSON string into a Python dictionary
+    sns_topic_arns = extract_sns_topics(invoking_event)  # Custom function to extract relevant SNS ARNs from the event
+
+    # Use ThreadPoolExecutor to evaluate multiple topics concurrently for improved performance
+    with ThreadPoolExecutor(max_workers=10) as executor:  # max_workers controls the level of concurrency
+        # Submit each SNS topic evaluation task to the executor for parallel processing
+        futures = {executor.submit(evaluate_compliance, arn): arn for arn in sns_topic_arns}
+
+        # Prepare a list to hold the compliance evaluation results to send back to AWS Config
+        evaluations = []
+        # Process each completed future as they finish
+        for future in as_completed(futures):
+            sns_topic_arn = futures[future]  # Retrieve the SNS topic ARN associated with the future
+            compliance_type = future.result()  # Get the result of the compliance check (COMPLIANT or NON_COMPLIANT)
+
+            # Append the evaluation result to the evaluations list
+            evaluations.append({
+                'ComplianceResourceType': 'AWS::SNS::Topic',  # Resource type for AWS Config evaluation
+                'ComplianceResourceId': sns_topic_arn.split(':')[-1],  # Extract the resource ID from the ARN
+                'ComplianceType': compliance_type,  # Compliance result (COMPLIANT or NON_COMPLIANT)
+                # Annotation provides additional context for the compliance evaluation
+                'Annotation': f"SNS Topic {sns_topic_arn} has non-compliant email subscription(s)." if compliance_type == 'NON_COMPLIANT' else "Compliant.",
+                'OrderingTimestamp': invoking_event['notificationCreationTime']  # Timestamp for ordering evaluations in AWS Config
+            })
+
+        # Send all accumulated evaluations back to AWS Config for compliance recording
+        config_client = boto3.client('config')  # Initialize AWS Config client
+        config_client.put_evaluations(
+            Evaluations=evaluations,  # Send the list of evaluations
+            ResultToken=event['resultToken']  # Use the result token provided by AWS Config to ensure the evaluation is recorded correctly
+        )
+
+    # Return a status message indicating that the compliance evaluation was completed successfully
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Compliance evaluation completed.')
+    }
+
+def extract_sns_topics(invoking_event):
+    """
+    Extracts SNS topic ARNs from the invoking event.
+    Modify this function based on the actual structure of the AWS Config event.
+    """
+    configuration_items = invoking_event.get('configurationItem', [])  # Get the configuration items from the invoking event
+    sns_topic_arns = []  # Initialize an empty list to hold SNS topic ARNs
+
+    # Example of extracting SNS topic ARNs - adjust based on actual event structure
+    if configuration_items:  # Check if configuration items exist
+        sns_topic_arns.append(configuration_items.get('arn'))  # Extract the ARN from the configuration item
+
+    return sns_topic_arns  # Return the list of SNS topic ARNs
+Detailed Explanation of Key Sections:
+Initialization:
+
+The script imports necessary libraries (boto3, json, os, and concurrent.futures) for AWS interaction, JSON handling, environment variable access, and parallel processing.
+evaluate_compliance() Function:
+
+This function checks each SNS topic to determine if all email subscriptions comply with the allowed domain. It handles pagination to fetch all subscriptions, evaluates each one, and returns COMPLIANT or NON_COMPLIANT.
+lambda_handler() Function:
+
+This is the main handler for AWS Lambda. It extracts the relevant SNS ARNs from the AWS Config event, evaluates each SNS topic in parallel using ThreadPoolExecutor, and prepares the compliance results to be sent back to AWS Config.
+extract_sns_topics() Function:
+
+A placeholder function designed to extract SNS topic ARNs from the AWS Config event. This function should be customized based on how the SNS topics are structured within the event data.
+Concurrency Management:
+
+The ThreadPoolExecutor allows multiple SNS topics to be evaluated simultaneously, improving the overall performance of the function, especially when handling a large number of SNS topics.
+Error Handling:
+
+Error handling is incorporated to ensure that if one topic evaluation fails, it does not stop the rest of the evaluations. The function defaults to a non-compliant status if an error occurs, which is a safer approach.
+Summary:
+The code efficiently handles multiple SNS topics using parallel processing and ensures all evaluations are accurately sent back to AWS Config.
+Inline explanations guide the understanding of each component, ensuring that the code is maintainable and adaptable to future changes or specific requirements.
+Proper error handling and logging ensure that the system is robust, even when dealing with unexpected issues.
+
+
+  
