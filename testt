@@ -1,0 +1,197 @@
+Here is a detailed explanation of the entire script visible in the image without altering any of the code lines:
+
+Script Explanation
+
+	1.	Script Initialization and Variable Declarations:
+
+#!/bin/bash
+# Begin the script
+echo "Running CloudFormation Guard validation"
+
+# Declare associative arrays and variables
+declare -A validated_guard_files
+declare -a failed_guards skipped_guards
+include_dirs=("${INCLUDE_LOCAL_DIRS[@]}")
+exclude_dirs=("${EXCLUDE_DIRS[@]}")
+
+# Fetch CodePipeline project details
+build_project_name=$(echo "$CODEBUILD_BUILD_ID" | cut -d ":" -f 1)
+codepipeline_project_details=$(aws codepipeline get-pipeline --name "$build_project_name")
+
+	•	The script starts by declaring associative arrays and lists to keep track of validated guard files, failed guards, and skipped guards.
+	•	It fetches CodePipeline project details based on the build ID.
+
+	2.	Extract Environment Variables and Tags:
+
+env_tag=$(echo "$ENVIRONMENT" | awk '{print toupper($0)}')
+cfn_guard_root_dir=$(echo "$codepipeline_project_details" | jq -r '.pipeline.stages[].actions[].configuration.S3ObjectKey' | cut -d '/' -f 1)
+DEFAULT_ENV="prod"
+
+if [[ "$env_tag" ]]; then
+    echo "Environment tag detected: $env_tag"
+else
+    echo "No environment tag detected, using default environment: $DEFAULT_ENV"
+    env_tag=$DEFAULT_ENV
+fi
+
+	•	Extracts environment tags and determines the root directory for the Cfn-Guard rules.
+	•	If no environment tag is provided, it defaults to “prod.”
+
+	3.	Directory and Severity Handling:
+
+for severity_dir in "$cfn_guard_root_dir/$env_tag"/*; do
+    if [[ -d "$severity_dir" ]]; then
+        severity=$(basename "$severity_dir")
+        echo "Validating severity: $severity"
+    fi
+done
+
+	•	Loops through severity directories (e.g., high, medium, low) within the root directory and prints out each severity level being validated.
+
+	4.	Standard Directory and Guard File Validation:
+
+for standard_dir in "$severity_dir"/*; do
+    if [[ -d "$standard_dir" ]]; then
+        standard=$(basename "$standard_dir")
+        echo "Checking standard: $standard"
+        find "$standard_dir" -type f -name "*.guard"
+    fi
+done
+
+	•	Iterates over subdirectories inside each severity directory to locate .guard files specific to compliance standards.
+
+	5.	Guard File Validation Logic:
+
+for guard_file_path in "${guard_files[@]}"; do
+    guard_file_name=$(basename "$guard_file_path")
+    echo "Validating guard file: $guard_file_name"
+    cfn-guard validate -r "$guard_file_path" -t "$CODEBUILD_SRC_DIR/cdk.out/*" --show-summary all -o json >> "$validation_result_json"
+    
+    # Update status arrays
+    if [[ $? -ne 0 ]]; then
+        failed_guards+=("$guard_file_name")
+    else
+        passed_guards+=("$guard_file_name")
+    fi
+done
+
+	•	Validates each guard file against the synthesized CloudFormation templates, appending the results to a JSON file.
+	•	Updates the status of each validation as passed or failed.
+
+	6.	Summary and Reporting:
+
+echo "Summary Report"
+echo "Total Guards: ${#validated_guard_files[@]}, Passed: ${#passed_guards[@]}, Failed: ${#failed_guards[@]}, Skipped: ${#skipped_guards[@]}"
+
+if [[ ${#failed_guards[@]} -gt 0 ]]; then
+    echo "Exiting with error due to failed guards."
+    exit 1
+fi
+
+	•	Provides a summary report of all guards validated, indicating which passed, failed, or were skipped.
+	•	If any guards failed, the script exits with an error code to halt further processing, typically triggering a failure state in a CI/CD pipeline.
+
+	7.	Final Message:
+
+echo "CloudFormation Guard validation completed"
+
+	•	Concludes the script, indicating that the validation process has finished.
+
+Overall Script Summary
+
+	•	Purpose: This script automates the process of validating CloudFormation templates against compliance rules defined in Cfn-Guard files.
+	•	Process: It fetches configurations from AWS CodePipeline, identifies guard files by severity and standard, validates them, and produces a summary report.
+	•	Error Handling: The script exits with an error if any guard files fail validation, ensuring compliance checks are enforced.
+
+This script is tailored for automated compliance validation within a CI/CD pipeline, making it robust for validating infrastructure against predefined security and operational standards.
+
+
+------
+
+
+
+Here’s the complete code with inline comments explaining each step directly within the script:
+
+#!/bin/bash
+# Begin the script
+echo "Running CloudFormation Guard validation"
+
+# Declare associative arrays and variables to track validated, failed, and skipped guards
+declare -A validated_guard_files
+declare -a failed_guards skipped_guards
+
+# Set directories to include and exclude
+include_dirs=("${INCLUDE_LOCAL_DIRS[@]}")
+exclude_dirs=("${EXCLUDE_DIRS[@]}")
+
+# Fetch CodePipeline project details using the build project name
+build_project_name=$(echo "$CODEBUILD_BUILD_ID" | cut -d ":" -f 1)
+codepipeline_project_details=$(aws codepipeline get-pipeline --name "$build_project_name")
+
+# Extract environment variables and determine the environment tag
+env_tag=$(echo "$ENVIRONMENT" | awk '{print toupper($0)}')
+cfn_guard_root_dir=$(echo "$codepipeline_project_details" | jq -r '.pipeline.stages[].actions[].configuration.S3ObjectKey' | cut -d '/' -f 1)
+DEFAULT_ENV="prod"
+
+# Handle environment tag and default fallback
+if [[ "$env_tag" ]]; then
+    echo "Environment tag detected: $env_tag"
+else
+    echo "No environment tag detected, using default environment: $DEFAULT_ENV"
+    env_tag=$DEFAULT_ENV
+fi
+
+# Iterate over severity directories (e.g., high, medium, low)
+for severity_dir in "$cfn_guard_root_dir/$env_tag"/*; do
+    if [[ -d "$severity_dir" ]]; then
+        severity=$(basename "$severity_dir") # Get severity name
+        echo "Validating severity: $severity" # Output severity being processed
+
+        # Iterate over standard directories inside each severity directory
+        for standard_dir in "$severity_dir"/*; do
+            if [[ -d "$standard_dir" ]]; then
+                standard=$(basename "$standard_dir") # Get standard name
+                echo "Checking standard: $standard" # Output standard being checked
+
+                # Find and validate all .guard files inside the current standard directory
+                guard_files=$(find "$standard_dir" -type f -name "*.guard") # Find guard files
+                for guard_file_path in ${guard_files[@]}; do
+                    guard_file_name=$(basename "$guard_file_path") # Get guard file name
+                    echo "Validating guard file: $guard_file_name" # Output the file being validated
+
+                    # Run Cfn-Guard validation and append results to the JSON output
+                    cfn-guard validate -r "$guard_file_path" -t "$CODEBUILD_SRC_DIR/cdk.out/*" --show-summary all -o json >> "$validation_result_json"
+
+                    # Check if the validation failed and update corresponding arrays
+                    if [[ $? -ne 0 ]]; then
+                        failed_guards+=("$guard_file_name") # Add to failed guards if validation failed
+                    else
+                        passed_guards+=("$guard_file_name") # Add to passed guards if validation succeeded
+                    fi
+                done
+            fi
+        done
+    fi
+done
+
+# Print summary of validation results
+echo "Summary Report"
+echo "Total Guards: ${#validated_guard_files[@]}, Passed: ${#passed_guards[@]}, Failed: ${#failed_guards[@]}, Skipped: ${#skipped_guards[@]}"
+
+# Exit with an error if any guards failed validation
+if [[ ${#failed_guards[@]} -gt 0 ]]; then
+    echo "Exiting with error due to failed guards."
+    exit 1
+fi
+
+# End of the script with a completion message
+echo "CloudFormation Guard validation completed"
+
+Summary of Inline Explanations
+
+	•	The script begins by setting up variables and arrays to manage validation results.
+	•	It fetches project details and identifies relevant directories based on the environment and severity levels.
+	•	The script validates .guard files, tracks pass/fail statuses, and provides a summary report.
+	•	If any validations fail, the script exits with an error code, which can trigger appropriate responses in CI/CD pipelines.
+
+This explanation is embedded directly into the code to provide context for each step, making it easy to understand the flow and purpose of the script.
