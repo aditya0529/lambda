@@ -1,0 +1,113 @@
+Here’s the code snippet from the image with a detailed explanation of each line, related to the previously explained code:
+
+# Loop through service directories found in the Cfn-Guard root directory
+for service_dir in $(find "$cfn_guard_root_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/||"); do
+  if [[ ! " ${exclude_dirs[@]} " =~ " ${service_dir} " ]]; then # Skip directories listed in exclude_dirs
+    # Loop through environment directories within each service directory
+    for environment_dir in $(find "$cfn_guard_root_dir/$service_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/||"); do
+      environment_sub_dirs=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/$environment_dir/||"))
+      # Loop through environment subdirectories
+      for environment_sub_dir in "${environment_sub_dirs[@]}"; do
+        if [[ ! "${environment_sub_dirs[0]}" ]]; then continue; fi # Skip if environment_sub_dirs is empty
+        if [[ ! "${environment_sub_dir}" =~ "^${env_tag}" ]]; then continue; fi # Skip if sub_dir does not match environment tag
+
+        # Loop through severity directories under each environment sub-directory
+        severity_dirs=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir/$environment_sub_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/$environment_dir/$environment_sub_dir/||"))
+        for severity_dir in "${severity_dirs[@]}"; do
+          if [[ ! "${severity_dirs[0]}" ]]; then continue; fi # Skip if severity_dirs is empty
+          
+          # Loop through standard directories within each severity directory
+          standards_dirs=($(find "$cfn_guard_root_dir/$service_dir/$environment_sub_dir/$severity_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/$environment_sub_dir/$severity_dir/||"))
+          for standard_dir in "${standards_dirs[@]}"; do
+            if [[ " ${exclude_dirs[@]} " =~ " $standard_dir " ]]; then continue; fi # Skip if the standard directory is excluded
+          
+            # Find and loop over guard files within the standard directory
+            guard_files=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir/$environment_sub_dir/$severity_dir/$standard_dir" -type f -name "*.guard"))
+            for guard_file_path in "${guard_files[@]}"; do
+              guard_file_name=$(basename "$guard_file_path") # Get the name of the guard file
+              if [[ " ${exclude_dirs[@]} " =~ " $guard_file_name " ]]; then continue; fi # Skip if guard file is excluded
+              all_guard_files+=("$guard_file_path") # Add guard file to the list of all_guard_files
+            done
+          done
+        done
+      done
+    done
+  fi
+done
+
+# Add guard files from severity directory directly
+guard_files=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir/$severity_dir" -type f -name "*.guard"))
+for guard_file_path in "${guard_files[@]}"; do
+  guard_file_name=$(basename "$guard_file_path") # Extract the guard file name
+  if [[ " ${exclude_dirs[@]} " =~ " $guard_file_name " ]]; then continue; fi # Skip excluded guard files
+  all_guard_files+=("$guard_file_path") # Add guard file to the list of all_guard_files
+done
+
+Explanation of Each Line:
+
+	1.	Loop through Service Directories:
+
+for service_dir in $(find "$cfn_guard_root_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/||"); do
+
+	•	Finds service directories inside the root directory, stripping the root path to get the relative names.
+
+	2.	Exclude Service Directories:
+
+if [[ ! " ${exclude_dirs[@]} " =~ " ${service_dir} " ]]; then
+
+	•	Checks if the current service directory is in the list of excluded directories. If it is, the loop skips this service.
+
+	3.	Loop through Environment Directories:
+
+for environment_dir in $(find "$cfn_guard_root_dir/$service_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/||"); do
+
+	•	Iterates over environment directories inside each service directory.
+
+	4.	Loop through Environment Sub-directories:
+
+for environment_sub_dir in "${environment_sub_dirs[@]}"; do
+  if [[ ! "${environment_sub_dirs[0]}" ]]; then continue; fi
+  if [[ ! "${environment_sub_dir}" =~ "^${env_tag}" ]]; then continue; fi
+
+	•	Iterates over subdirectories of each environment, skipping if the sub-directory list is empty or does not match the environment tag.
+
+	5.	Loop through Severity Directories:
+
+severity_dirs=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir/$environment_sub_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/$environment_dir/$environment_sub_dir/||"))
+
+	•	Finds severity directories under the environment sub-directory.
+
+	6.	Loop through Standard Directories:
+
+for standard_dir in "${standards_dirs[@]}"; do
+  if [[ " ${exclude_dirs[@]} " =~ " $standard_dir " ]]; then continue; fi
+
+	•	Iterates over standard directories inside each severity directory, skipping those listed in exclude_dirs.
+
+	7.	Find Guard Files in Each Standard Directory:
+
+guard_files=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir/$environment_sub_dir/$severity_dir/$standard_dir" -type f -name "*.guard"))
+
+	•	Finds all .guard files in each standard directory.
+
+	8.	Loop through and Exclude Specific Guard Files:
+
+for guard_file_path in "${guard_files[@]}"; do
+  guard_file_name=$(basename "$guard_file_path")
+  if [[ " ${exclude_dirs[@]} " =~ " $guard_file_name " ]]; then continue; fi
+  all_guard_files+=("$guard_file_path")
+
+	•	Iterates over the found guard files, skipping those listed in the exclusion list and adding the rest to all_guard_files.
+
+	9.	Directly Add Guard Files from Severity Directory:
+
+guard_files=($(find "$cfn_guard_root_dir/$service_dir/$environment_dir/$severity_dir" -type f -name "*.guard"))
+
+	•	Finds .guard files directly under each severity directory and adds them to the list of all guard files.
+
+Summary:
+
+	•	The code is part of a comprehensive script designed to validate AWS CloudFormation templates using Cfn-Guard rules.
+	•	It navigates through a nested directory structure organized by services, environments, severities, and standards.
+	•	The script carefully includes or excludes directories and files based on specific conditions, ensuring that only relevant guard files are validated.
+	•	The end goal is to gather all .guard files that meet the criteria for validation, ready for processing by Cfn-Guard.
