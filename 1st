@@ -1,0 +1,111 @@
+Here is the code snippet and a detailed explanation of each line of the script provided in the image:
+
+# Declare arrays for tracking guard files and their statuses
+declare -a validated_guard_files failed_guards passed_guards skipped_guards
+declare -a all_guard_files
+
+# Fetch project details using AWS CLI
+codepipeline_project_details=$(aws codebuild batch-get-projects --names "$BUILD_PROJECT_NAME")
+
+# Convert include and exclude directories lists into arrays
+IFS=', ' read -r -a include_local_dirs <<< "$INCLUDE_LOCAL_DIRS" # Split INCLUDE_LOCAL_DIRS into array
+IFS=', ' read -r -a exclude_dirs <<< "$EXCLUDE_DIRS"             # Split EXCLUDE_DIRS into array
+
+# Extract environment variables from the project details
+env_tag=$(echo "$codepipeline_project_details" | jq -r '.projects[].environment.environmentVariables[] | select(.name == "SW_ENVIRONMENT").value')
+cfn_guard_root_dir=$(echo "$codepipeline_project_details" | jq -r '.projects[].environment.environmentVariables[] | select(.name == "ROOT_DIR").value')
+
+# Default environment handling
+DEFAULT_ENV="prod"  # Set default environment to "prod"
+
+# Check if environment variable is set, otherwise use default
+if [[ -z "$env_tag" ]]; then
+    echo "Environment variable SW_ENVIRONMENT in the build project is not set. So, using default environment: $DEFAULT_ENV"
+    env_tag=$DEFAULT_ENV
+fi
+
+# Check if the default environment is set properly
+if [[ -z "$env_tag" ]]; then
+    echo "No environment tag and default environment have been set. So Exiting."
+    exit 1 # Exit with error if no environment tag is set
+fi
+
+# Output the environment being checked
+echo "Checking for $env_tag Environment"
+
+# Log excluded validations
+echo "Excluded validation for Service(s): ${service_dirs[@]}"
+echo "Excluded validation for Severity: ${severity_dirs[@]}"
+echo "Excluded validation for Standards: ${standards_dirs[@]}"
+echo "Excluded directories and guard files for validation: ${exclude_dirs[@]}"
+
+Explanation of Each Line:
+
+	1.	Declare Arrays:
+
+declare -a validated_guard_files failed_guards passed_guards skipped_guards
+declare -a all_guard_files
+
+	•	These lines declare arrays to track different states of guard files during validation (validated, failed, passed, skipped).
+
+	2.	Fetch Project Details:
+
+codepipeline_project_details=$(aws codebuild batch-get-projects --names "$BUILD_PROJECT_NAME")
+
+	•	This line fetches the details of the CodeBuild project specified by the $BUILD_PROJECT_NAME using the AWS CLI.
+
+	3.	Convert Lists into Arrays:
+
+IFS=', ' read -r -a include_local_dirs <<< "$INCLUDE_LOCAL_DIRS"
+IFS=', ' read -r -a exclude_dirs <<< "$EXCLUDE_DIRS"
+
+	•	Converts comma-separated strings of directories (INCLUDE_LOCAL_DIRS and EXCLUDE_DIRS) into arrays for easier handling in the script.
+
+	4.	Extract Environment Variables:
+
+env_tag=$(echo "$codepipeline_project_details" | jq -r '.projects[].environment.environmentVariables[] | select(.name == "SW_ENVIRONMENT").value')
+cfn_guard_root_dir=$(echo "$codepipeline_project_details" | jq -r '.projects[].environment.environmentVariables[] | select(.name == "ROOT_DIR").value')
+
+	•	Uses jq to parse the JSON output from AWS CLI and extract specific environment variables (SW_ENVIRONMENT and ROOT_DIR) from the project details.
+
+	5.	Set Default Environment:
+
+DEFAULT_ENV="prod"
+
+	•	Defines the default environment as “prod” in case the environment variable is not set.
+
+	6.	Check Environment Variable:
+
+if [[ -z "$env_tag" ]]; then
+    echo "Environment variable SW_ENVIRONMENT in the build project is not set. So, using default environment: $DEFAULT_ENV"
+    env_tag=$DEFAULT_ENV
+fi
+
+	•	Checks if env_tag is empty. If it is, it sets env_tag to the default environment (prod) and informs the user.
+
+	7.	Exit if No Environment Tag:
+
+if [[ -z "$env_tag" ]]; then
+    echo "No environment tag and default environment have been set. So Exiting."
+    exit 1
+fi
+
+	•	Exits the script with an error if env_tag is still not set, ensuring that the script doesn’t proceed without an environment context.
+
+	8.	Log Environment Being Checked:
+
+echo "Checking for $env_tag Environment"
+
+	•	Outputs which environment the script is checking, helping with debugging and clarity during execution.
+
+	9.	Log Excluded Validations:
+
+echo "Excluded validation for Service(s): ${service_dirs[@]}"
+echo "Excluded validation for Severity: ${severity_dirs[@]}"
+echo "Excluded validation for Standards: ${standards_dirs[@]}"
+echo "Excluded directories and guard files for validation: ${exclude_dirs[@]}"
+
+	•	Logs which services, severities, and standards are excluded from validation, as well as any specific directories or guard files that are excluded, providing transparency in the validation process.
+
+This code is designed to set up the environment for validating AWS CloudFormation templates using Cfn-Guard. 
+It ensures that necessary configurations are correctly loaded, exclusions are properly handled, and the script exits safely when configurations are missing.
