@@ -60,3 +60,28 @@ A command-line utility that displays the directory structure of a path or folder
 file:
 
 A command that determines the type of a file by examining its content, rather than its file extension. Useful for identifying unknown files.
+
+
+
+---------
+
+
+1. What is ca-trust and Why Copy Netskope Certs There?
+The ca-trust refers to the system's certificate trust store, which contains trusted root and intermediate certificates used for validating SSL/TLS connections. When an application (like a web browser, API client, or any network service) makes a secure connection to a server, it checks the server’s certificate against the trusted certificates in the ca-trust store. If the server’s certificate chains up to a trusted root, the connection is considered secure.
+
+Why Copy Netskope Certs to ca-trust?
+When Netskope is used for SSL/TLS inspection (i.e., decrypting and inspecting encrypted traffic), 
+it acts as an intermediary and re-encrypts traffic with its own certificate. 
+To avoid SSL/TLS errors (like "untrusted certificate" errors), the Netskope CA certificate must be added to the system’s trusted certificate store (ca-trust), so that the system recognizes Netskope as a legitimate certificate issuer.
+
+
+
+
+
+-------
+
+
+
+netskope provides a broad range of security services designed to protect data, users, and applications across cloud services, web traffic, and private applications. 
+These services are delivered through Netskope's Security Cloud, which integrates Cloud Access Security Broker (CASB), Secure Web Gateway (SWG), Zero Trust Network Access (ZTNA), 
+and other security capabilities to provide comprehensive protection. Below are the key Netskope-protected services:
