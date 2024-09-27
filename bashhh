@@ -121,3 +121,86 @@ fi
 echo "All guard rules are validated"
 echo "-------------------------------------"
 echo "CloudFormation Guard validation completed"
+
+
+
+--------------
+
+
+
+#!/bin/bash
+
+# Begin the script
+echo "Running CloudFormation Guard validation"
+
+# Declare associative arrays for validated guard files
+declare -A validated_guards
+declare -a all_guard_files
+declare -a failed_guards passed_guards skipped_guards
+
+# Example setup for environment variables (adjust as needed)
+env_tag="dev"  
+cfn_guard_root_dir="/path/to/guard/rules"  
+
+# Collect all guard files (replace with your dynamic logic)
+all_guard_files=(/path/to/guard/files/*.guard)
+
+# Check if there are any guard files
+if [[ ${#all_guard_files[@]} -eq 0 ]]; then
+    echo "No guard files to validate. Exiting."
+    exit 1
+fi
+
+# Colors for status
+PASS_COLOR=$(tput setaf 2) # Green
+FAIL_COLOR=$(tput setaf 1) # Red
+SKIP_COLOR=$(tput setaf 3) # Yellow
+RESET_COLOR=$(tput sgr0)   # Reset to default color
+
+# Validate each guard file
+for guard_file_path in "${all_guard_files[@]}"; do
+    guard_file_name=$(basename "$guard_file_path")
+
+    # Skip already validated guards
+    if [[ ${validated_guards["$guard_file_name"]} ]]; then
+        continue
+    fi
+
+    # Run validation and capture the result
+    cfn-guard validate --rules "$guard_file_path" --data ${CODEBUILD_SRC_DIR}/cdk.out --show-summary all -o json > validation_result.json
+
+    # Parse validation result and categorize
+    if grep -q "FAIL" validation_result.json; then
+        failed_guards+=("$guard_file_name")
+        echo "${FAIL_COLOR}Failed: $guard_file_name${RESET_COLOR}"
+    elif grep -q "PASS" validation_result.json; then
+        passed_guards+=("$guard_file_name")
+        echo "${PASS_COLOR}Passed: $guard_file_name${RESET_COLOR}"
+    else
+        skipped_guards+=("$guard_file_name")
+        echo "${SKIP_COLOR}Skipped: $guard_file_name${RESET_COLOR}"
+    fi
+
+    # Mark as validated
+    validated_guards["$guard_file_name"]=1
+done
+
+# Summary of overall results
+echo -e "\n-------------------------------------"
+echo "Summary Report:"
+echo "-------------------------------------"
+echo "Total Guards: $((${#passed_guards[@]} + ${#failed_guards[@]} + ${#skipped_guards[@]}))"
+echo "${PASS_COLOR}Passed Guards: ${#passed_guards[@]}${RESET_COLOR}"
+echo "${FAIL_COLOR}Failed Guards: ${#failed_guards[@]}${RESET_COLOR}"
+echo "${SKIP_COLOR}Skipped Guards: ${#skipped_guards[@]}${RESET_COLOR}"
+
+# Exit with error if any guards failed
+if (( ${#failed_guards[@]} > 0 )); then
+    echo "${FAIL_COLOR}Exiting with error due to failed guards.${RESET_COLOR}"
+    exit 1
+fi
+
+echo "${PASS_COLOR}All guard rules are validated successfully.${RESET_COLOR}"
+echo "-------------------------------------"
+echo "CloudFormation Guard validation completed"
+
