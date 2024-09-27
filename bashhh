@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Begin the script
+echo "Running CloudFormation Guard validation"
+
+# Declare associative array for validated guard files
+declare -A validated_guards
+declare -A failed_guards passed_guards skipped_guards
+declare -a all_guard_files
+
+# Fetch project details using aws CLI
+codepipeline_project_details=$(aws codebuild batch-get-projects --names "$BUILD_PROJECT_NAME")
+
+# Convert lists to arrays
+IFS=',' read -r -a include_dirs <<< "$INCLUDE_LOCAL_DIRS"
+IFS=',' read -r -a exclude_dirs <<< "$EXCLUDE_DIRS"
+
+# Extract environment variables
+env_tag=$(echo "$codepipeline_project_details" | jq -r ".projects[].environment.environmentVariables[] | select(.name == \"SW_ENVIRONMENT\").value")
+cfn_guard_root_dir=$(echo "$codepipeline_project_details" | jq -r ".projects[].environment.environmentVariables[] | select(.name == \"ROOT_DIR\").value")
+
+# Default environment handling
+if [ -z "$env_tag" ]; then
+    echo "Environment variable SW_ENVIRONMENT in the build project is not set. So, using default environment: $DEFAULT_ENV"
+    env_tag=$DEFAULT_ENV
+fi
+
+# Check if the default environment is set
+if [ -z "$env_tag" ]; then
+    echo "No environment tag and default environment has been set. So Exiting."
+    exit 1 # Exit with an error code
+fi
+
+echo "Checking for env tag Environment: $env_tag"
+echo "Excluded validation for Service(s): ${service_dirs[@]}"
+echo "Excluded validation for Severity: ${severity_dirs[@]}"
+echo "Excluded validation for Standards: ${standard_dirs[@]}"
+echo "Excluded directories and guard files from validation: ${exclude_dirs[@]}"
+
+service_dirs=$(find "$cfn_guard_root_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/||")
+for service_dir in "${service_dirs[@]}"; do
+    if [[ " ${exclude_dirs[@]} " =~ " ${service_dir} " ]]; then
+        continue
+    fi
+
+    environment_dirs=$(find "$cfn_guard_root_dir/$service_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/||")
+    for environment_sub_dir in "${environment_dirs[@]}"; do
+        if [[ "$environment_sub_dir" != "$env_tag" ]]; then
+            continue
+        fi
+
+        severity_dirs=$(find "$cfn_guard_root_dir/$service_dir/$environment_sub_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/$environment_sub_dir/||")
+        for severity_dir in "${severity_dirs[@]}"; do
+            if [[ " ${exclude_dirs[@]} " =~ " ${severity_dir} " ]]; then
+                continue
+            fi
+
+            standard_dirs=$(find "$cfn_guard_root_dir/$service_dir/$environment_sub_dir/$severity_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/$environment_sub_dir/$severity_dir/||")
+            for standard_dir in "${standard_dirs[@]}"; do
+                for guard_file_path in $(find "$cfn_guard_root_dir/$service_dir/$environment_sub_dir/$severity_dir/$standard_dir" -type f -name "*.guard"); do
+                    all_guard_files+=("$guard_file_path")
+                done
+            done
+        done
+    done
+done
+
+# Handle local guard files
+if [ -n "$INCLUDE_LOCAL_DIRS" ]; then
+    for local_dir in "${include_dirs[@]}"; do
+        local_guard_files=$(find "$local_dir" -type f -name "*.guard")
+        for local_guard_file in ${local_guard_files[@]}; do
+            all_guard_files+=("$local_guard_file")
+        done
+    done
+fi
+
+# Validate all collected guard files
+if [[ ${#all_guard_files[@]} -eq 0 ]]; then
+    echo "No guard files to validate. Exiting."
+    exit 1 # Exit with an error code
+fi
+
+# Validate each guard file
+for guard_file_path in "${all_guard_files[@]}"; do
+    guard_file_name=$(basename "$guard_file_path")
+
+    if [[ ${validated_guards["$guard_file_name"]} ]]; then
+        continue # Skip already validated guard file
+    fi
+
+    # Validate the guard file
+    cfn-guard validate --rules "$guard_file_path" --data ${CODEBUILD_SRC_DIR}/cdk.out --show-summary all -o json > validation_result.json
+
+    if grep -q "FAIL" validation_result.json; then
+        failed_guards+=("$guard_file_name")
+    elif grep -q "PASS" validation_result.json; then
+        passed_guards+=("$guard_file_name")
+    else
+        skipped_guards+=("$guard_file_name")
+    fi
+
+    validated_guards["$guard_file_name"]=1
+done
+
+# Report results
+echo "-------------------------------------"
+echo "Summary Report Overall: "
+echo "-------------------------------------"
+total_guards_count=$((${#passed_guards[@]} + ${#failed_guards[@]} + ${#skipped_guards[@]}))
+echo "Total Guards: $total_guards_count"
+echo "Passed Guards: ${#passed_guards[@]}"
+echo "Failed Guards: ${#failed_guards[@]}"
+echo "Skipped Guards: ${#skipped_guards[@]}"
+
+if (( ${#failed_guards[@]} > 0 )); then
+    echo "Exiting with error due to failed guards."
+    exit 1 # Exit with an error code
+fi
+
+echo "All guard rules are validated"
+echo "-------------------------------------"
+echo "CloudFormation Guard validation completed"
