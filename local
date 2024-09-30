@@ -151,4 +151,15 @@ The script detects --local and sets RUNNING_LOCALLY=true, so it will use local e
 
 --------
 
-In shell scripting (such as in Bash), esac is used to end a case statement. The case statement in Bash is similar to switch statements in other programming languages (like C, C++, or JavaScript).
+In shell scripting (such as in Bash), esac is used to end a case statement. The case statement in Bash is similar to switch statements in other programming languages (like C, C++, or JavaScript).'''
+
+
+
+
+-----docker run --rm \
+    -v /path/to/local/cdk-template.yaml:/usr/src/app/cdk-template.yaml \
+    cfn-guard-validator --local
+
+
+
+
