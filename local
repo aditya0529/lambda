@@ -1,0 +1,154 @@
+#!/bin/bash
+
+# Begin the script
+echo "Running CloudFormation Guard validation"
+
+# Declare associative array for validated guard files
+declare -A validated_guards
+declare -A failed_guards passed_guards skipped_guards
+declare -a all_guard_files
+
+# Parse command-line options to detect the --local flag
+RUNNING_LOCALLY=false
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --local) RUNNING_LOCALLY=true ;;  # Set the flag if --local is passed
+    esac
+    shift
+done
+
+# Check if running locally based on the flag
+if [ "$RUNNING_LOCALLY" = "true" ]; then
+    echo "Running Locally - Setting environment variables from local configuration"
+    
+    # Locally set variables if not provided in the environment
+    BUILD_PROJECT_NAME=${BUILD_PROJECT_NAME:-"your_local_build_project_name"}
+    INCLUDE_LOCAL_DIRS=${INCLUDE_LOCAL_DIRS:-"local_include_dirs"}
+    EXCLUDE_DIRS=${EXCLUDE_DIRS:-"local_exclude_dirs"}
+    DEFAULT_ENV=${DEFAULT_ENV:-"dev"}
+    cfn_guard_root_dir=${cfn_guard_root_dir:-"/path/to/your/root_dir"}
+    
+    # Set environment tag to default environment
+    env_tag=${DEFAULT_ENV}
+
+else
+    echo "Running in Pipeline - Fetching project details using AWS CLI"
+    
+    # Fetch project details using aws CLI if running in the pipeline
+    codepipeline_project_details=$(aws codebuild batch-get-projects --names "$BUILD_PROJECT_NAME")
+
+    # Convert lists to arrays
+    IFS=',' read -r -a include_dirs <<< "$INCLUDE_LOCAL_DIRS"
+    IFS=',' read -r -a exclude_dirs <<< "$EXCLUDE_DIRS"
+
+    # Extract environment variables from AWS CodeBuild environment settings
+    env_tag=$(echo "$codepipeline_project_details" | jq -r ".projects[].environment.environmentVariables[] | select(.name == \"SW_ENVIRONMENT\").value")
+    cfn_guard_root_dir=$(echo "$codepipeline_project_details" | jq -r ".projects[].environment.environmentVariables[] | select(.name == \"ROOT_DIR\").value")
+
+    # Default environment handling for pipeline
+    if [ -z "$env_tag" ]; then
+        echo "Environment variable SW_ENVIRONMENT in the build project is not set. So, using default environment: $DEFAULT_ENV"
+        env_tag=$DEFAULT_ENV
+    fi
+
+    # Check if the default environment is set
+    if [ -z "$env_tag" ]; then
+        echo "No environment tag and default environment has been set. So Exiting."
+        exit 1 # Exit with an error code
+    fi
+fi
+
+# Common logic, using env_tag and cfn_guard_root_dir regardless of the environment
+echo "Checking for env tag Environment: $env_tag"
+echo "Excluded validation for Service(s): ${service_dirs[@]}"
+echo "Excluded validation for Severity: ${severity_dirs[@]}"
+echo "Excluded validation for Standards: ${standard_dirs[@]}"
+echo "Excluded directories and guard files from validation: ${exclude_dirs[@]}"
+
+# Fetch service directories from the root directory
+service_dirs=$(find "$cfn_guard_root_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/||")
+
+# Loop through service directories and apply exclusions
+for service_dir in "${service_dirs[@]}"; do
+    if [[ " ${exclude_dirs[@]} " =~ " ${service_dir} " ]]; then
+        continue
+    fi
+
+    # Find environment subdirectories within service directories
+    environment_dirs=$(find "$cfn_guard_root_dir/$service_dir" -type d -maxdepth 1 -mindepth 1 | sed "s|$cfn_guard_root_dir/$service_dir/||")
+    for environment_sub_dir in "${environment_dirs[@]}"; do
+        if [[ "$environment_sub_dir" != "$env_tag" ]]; then
+            continue
+        fi
+
+        # Proceed with validation or any other logic
+        echo "Processing $service_dir/$environment_sub_dir"
+        # Add your CloudFormation Guard validation or other tasks here
+    done
+done
+
+echo "Validation completed."
+
+
+
+./your_script.sh --local
+
+------
+
+
+Flag Variable (RUNNING_LOCALLY):
+We use a variable RUNNING_LOCALLY and initially set it to false:
+bash
+Copy code
+RUNNING_LOCALLY=false
+This means that by default, the script assumes it is not running locally.
+2. Command-Line Arguments Parsing:
+The script then checks if any command-line arguments were passed, specifically looking for the --local flag:
+bash
+Copy code
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --local) RUNNING_LOCALLY=true ;;  # If --local flag is passed, set RUNNING_LOCALLY to true
+    esac
+    shift  # Move to the next argument
+done
+Here's what this does:
+
+"$#" represents the number of arguments passed to the script.
+The while loop runs as long as there are arguments remaining.
+case $1 checks the first argument ($1 refers to the current argument). If the argument is --local, we set RUNNING_LOCALLY=true, meaning the script will now treat this as local execution.
+shift moves to the next argument in the list.
+3. Checking the Flag:
+After parsing the arguments, we check if RUNNING_LOCALLY is set to true:
+
+bash
+Copy code
+if [ "$RUNNING_LOCALLY" = "true" ]; then
+    echo "Running Locally - Setting environment variables from local configuration"
+If the flag was passed (i.e., RUNNING_LOCALLY=true), the script enters this block and uses local environment settings.
+
+Simplified Explanation in Steps:
+By default, the script assumes it's running in the pipeline (RUNNING_LOCALLY=false).
+If you pass the --local flag when running the script, it sets RUNNING_LOCALLY=true to indicate the script is running locally.
+Based on this flag, the script can either use local environment variables (if RUNNING_LOCALLY=true) or proceed with the pipeline-specific logic.
+Example:
+Running in the pipeline (no --local flag):
+
+bash
+Copy code
+./script.sh
+The script runs with pipeline logic because RUNNING_LOCALLY=false.
+
+Running locally (with --local flag):
+
+bash
+Copy code
+./script.sh --local
+The script detects --local and sets RUNNING_LOCALLY=true, so it will use local environment variables and logic.
+
+
+
+
+--------
+
+In shell scripting (such as in Bash), esac is used to end a case statement. The case statement in Bash is similar to switch statements in other programming languages (like C, C++, or JavaScript).
