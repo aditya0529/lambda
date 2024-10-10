@@ -1,0 +1,181 @@
+To enhance the Lambda function for best practices, we'll add the following improvements:
+
+Key Age Calculation: Include the age of the key in days in the findings to provide better context.
+Error Handling: Implement robust error handling to manage various edge cases and log errors appropriately.
+Logging: Use structured logging to make troubleshooting and monitoring easier.
+Edge Cases: Cover scenarios where users might not have access keys, or when there are rate limits or permissions issues.
+Code Optimization: Simplify loops and logic to handle unexpected cases gracefully.
+Here's the updated CloudFormation template with a more detailed and robust Lambda function.
+
+Updated Lambda Function Code (with Inline Comments)
+yaml
+Copy code
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Custom AWS Config rule to detect IAM access keys older than 18 months and integrate with Security Hub.
+
+Resources:
+  # IAM Role for Lambda function with necessary permissions
+  IAMRoleForLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: IAMAccessKeyRotationCheckRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaIAMAccessKeyRotationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers         # Allows the Lambda to list IAM users.
+                  - iam:ListAccessKeys    # Allows the Lambda to list access keys for each user.
+                  - config:PutEvaluations # Allows the Lambda to report compliance status to AWS Config.
+                  - securityhub:BatchImportFindings # Allows the Lambda to send findings to AWS Security Hub.
+                  - logs:CreateLogGroup   # Allows the Lambda to create CloudWatch log groups.
+                  - logs:CreateLogStream  # Allows the Lambda to create CloudWatch log streams.
+                  - logs:PutLogEvents     # Allows the Lambda to write logs to CloudWatch.
+                Resource: '*'
+
+  # Lambda Function for evaluating IAM access keys
+  IAMAccessKeyRotationCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: IAMAccessKeyRotationCheckFunction
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt IAMRoleForLambda.Arn
+      Timeout: 300  # Set the timeout to handle large data processing
+      Code:
+        ZipFile: |
+          import boto3
+          from datetime import datetime, timedelta
+          import logging
+          from botocore.exceptions import ClientError, BotoCoreError
+
+          # Initialize AWS clients for IAM, Config, and Security Hub
+          iam_client = boto3.client('iam')
+          config_client = boto3.client('config')
+          securityhub_client = boto3.client('securityhub')
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              try:
+                  expiration_threshold = datetime.now() - timedelta(days=18 * 30) # 18-month threshold
+                  non_compliant_keys = []  # List to store non-compliant access keys
+                  users = iam_client.list_users()['Users']  # Retrieve all IAM users
+                  
+                  for user in users:
+                      try:
+                          access_keys = iam_client.list_access_keys(UserName=user['UserName'])['AccessKeyMetadata']
+                          for key in access_keys:
+                              key_age_days = (datetime.now(key['CreateDate'].tzinfo) - key['CreateDate']).days
+                              
+                              if key['Status'] == 'Active' and key['CreateDate'] <= expiration_threshold:
+                                  non_compliant_keys.append({
+                                      'UserName': user['UserName'],
+                                      'AccessKeyId': key['AccessKeyId'],
+                                      'CreateDate': key['CreateDate'].strftime('%Y-%m-%d'),
+                                      'KeyAge': key_age_days
+                                  })
+
+                      except ClientError as e:
+                          logger.error(f"Error retrieving access keys for user {user['UserName']}: {e}")
+                      except Exception as e:
+                          logger.error(f"Unexpected error for user {user['UserName']}: {e}")
+
+                  # Report compliance status to AWS Config
+                  compliance_type = 'NON_COMPLIANT' if non_compliant_keys else 'COMPLIANT'
+                  config_client.put_evaluations(
+                      Evaluations=[
+                          {
+                              'ComplianceResourceType': 'AWS::IAM::User',
+                              'ComplianceResourceId': 'IAMAccessKeyCheck',
+                              'ComplianceType': compliance_type,
+                              'OrderingTimestamp': datetime.now()
+                          },
+                      ],
+                      ResultToken=event.get('resultToken', 'NoTokenProvided')
+                  )
+
+                  # Send non-compliant findings to AWS Security Hub
+                  if non_compliant_keys:
+                      findings = []
+                      for key in non_compliant_keys:
+                          findings.append({
+                              'SchemaVersion': '2018-10-08',
+                              'Id': f'{key["UserName"]}/{key["AccessKeyId"]}',
+                              'ProductArn': f'arn:aws:securityhub:{context.invoked_function_arn.split(":")[3]}:aws:product/aws/securityhub',
+                              'GeneratorId': 'iam-access-key-rotation-check',
+                              'AwsAccountId': context.invoked_function_arn.split(":")[4],
+                              'Types': ['Software and Configuration Checks/AWS Security Best Practices'],
+                              'CreatedAt': datetime.now().isoformat(),
+                              'UpdatedAt': datetime.now().isoformat(),
+                              'Severity': {'Label': 'HIGH'},  # Set the severity to HIGH
+                              'Title': 'IAM Access Key Rotation Best Practice Violation',
+                              'Description': f'Active IAM access key {key["AccessKeyId"]} for user {key["UserName"]} is older than 18 months (Key Age: {key["KeyAge"]} days).',
+                              'Resources': [
+                                  {
+                                      'Type': 'AwsIamAccessKey',
+                                      'Id': key["AccessKeyId"],
+                                      'Partition': 'aws',
+                                      'Region': context.invoked_function_arn.split(":")[3]
+                                  }
+                              ],
+                              'Compliance': {'Status': 'FAILED'},
+                              'RecordState': 'ACTIVE'
+                          })
+                      securityhub_client.batch_import_findings(Findings=findings)
+
+                  logger.info(f"Compliance type reported: {compliance_type}")
+                  return {
+                      'statusCode': 200,
+                      'compliance_type': compliance_type
+                  }
+
+              except (ClientError, BotoCoreError) as error:
+                  logger.error(f"AWS Error occurred: {error}")
+              except Exception as e:
+                  logger.error(f"General error occurred: {e}")
+Key Enhancements in the Updated Code
+Key Age Calculation:
+
+We calculate the age of each key in days (key_age_days) and include it in the Security Hub findings to provide more context about how old the key is.
+Error Handling Improvements:
+
+Separate try-except blocks are used for handling AWS service errors (e.g., rate limits or permissions) and other generic errors.
+Error messages are logged to provide detailed information on what went wrong, making it easier to troubleshoot issues.
+Structured Logging:
+
+Logging is implemented using Python's built-in logging module to write informational and error messages to CloudWatch Logs.
+This makes it easier to analyze, filter, and troubleshoot logs.
+Edge Case Handling:
+
+Covers scenarios where users have no access keys or when a user has no active access keys.
+Properly handles and logs any unexpected errors or issues with API calls to avoid failure of the entire process.
+AWS Config and Security Hub Integration:
+
+Findings are generated with the new severity level of HIGH, in alignment with security best practices.
+If a rate-limiting error occurs, the function logs the error message and can be retried with an exponential backoff strategy if necessary.
+CloudFormation Template Explanation
+IAM Role for Lambda: Provides necessary permissions to interact with IAM, AWS Config, CloudWatch Logs, and Security Hub.
+Lambda Function: Evaluates access keys, handles errors, logs messages, and sends findings to Security Hub.
+Timeouts: The Lambda function timeout is increased to handle potentially large datasets to prevent early termination.
+Best Practices Followed
+Detailed Logging: Ensures all issues are logged clearly and concisely for monitoring and debugging.
+Error Handling: Covers common AWS service errors like ClientError, BotoCoreError, and other unexpected issues.
+Security Hub Severity: Sets the severity to HIGH to reflect the importance of rotating access keys regularly.
+Least Privilege IAM Role: Limits the permissions granted to the Lambda function to only what is necessary.
+Deployment Steps
+Deploy the CloudFormation Template: Upload and deploy the template using AWS CloudFormation in the AWS Management Console or through the CLI.
+Enable Security Hub Integration: Ensure that Security Hub is enabled to receive findings from the Lambda function.
+Testing: Verify the AWS Config rule and Security Hub to confirm that findings for non-compliant access keys are reported correctly.
+This robust solution follows AWS best practices, providing secure and efficient detection of IAM access keys that require rotation while handling potential issues gracefully.
