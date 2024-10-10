@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Custom AWS Config rule to detect IAM access keys older than 18 months and integrate with Security Hub.
+Description: Custom AWS Config rule to detect IAM access keys older than 22 months and integrate with Security Hub.
 
 Resources:
   # IAM Role for Lambda function with necessary permissions
@@ -23,7 +23,6 @@ Resources:
                 Action:
                   - iam:ListUsers         # Allows the Lambda to list IAM users.
                   - iam:ListAccessKeys    # Allows the Lambda to list access keys for each user.
-                  - iam:GetAccessKeyLastUsed  # Allows the Lambda to get the last used information for each access key.
                   - config:PutEvaluations # Allows the Lambda to report compliance status to AWS Config.
                   - securityhub:BatchImportFindings # Allows the Lambda to send findings to AWS Security Hub.
                   - logs:CreateLogGroup   # Allows the Lambda to create CloudWatch log groups.
@@ -44,10 +43,8 @@ Resources:
       Code:
         ZipFile: |
           import boto3
-          import time
           import logging
           from datetime import datetime, timedelta
-          from botocore.exceptions import ClientError, BotoCoreError
 
           # Initialize AWS clients for IAM, Config, and Security Hub
           iam_client = boto3.client('iam')
@@ -58,62 +55,36 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          def call_with_backoff(func, *args, **kwargs):
-              retries = 5
-              backoff_time = 1
-              for attempt in range(retries):
-                  try:
-                      return func(*args, **kwargs)
-                  except ClientError as e:
-                      if e.response['Error']['Code'] == 'Throttling':
-                          logger.warning(f"Throttling error occurred, retrying in {backoff_time} seconds...")
-                          time.sleep(backoff_time)
-                          backoff_time *= 2  # Exponential backoff
-                      else:
-                          raise e  # Re-raise the error if it's not a rate-limiting issue
-              logger.error("Exceeded retry attempts due to throttling.")
-              raise e
-
           def lambda_handler(event, context):
               try:
-                  threshold_days = 180  # Set the threshold to 180 days (6 months) since the key was last used
+                  threshold_days = 22 * 30  # Threshold set to 22 months in days
                   non_compliant_keys = []  # List to store non-compliant access keys
-                  
+
                   # Use paginator for listing all IAM users
                   paginator = iam_client.get_paginator('list_users')
-                  for page in call_with_backoff(paginator.paginate):  # Use backoff for listing users
+                  for page in paginator.paginate():  # List all IAM users
                       users = page['Users']
                       for user in users:
                           try:
                               # Use paginator for listing access keys for each user
                               key_paginator = iam_client.get_paginator('list_access_keys')
-                              for key_page in call_with_backoff(key_paginator.paginate, UserName=user['UserName']):
+                              for key_page in key_paginator.paginate(UserName=user['UserName']):
                                   access_keys = key_page['AccessKeyMetadata']
                                   for key in access_keys:
-                                      # Fetch the last usage information for each key
-                                      last_used_info = iam_client.get_access_key_last_used(AccessKeyId=key['AccessKeyId'])
-                                      last_used_date = last_used_info.get('AccessKeyLastUsed', {}).get('LastUsedDate')
-                                      
-                                      # Calculate the active key age (days since last used)
-                                      if last_used_date:
-                                          active_key_age_days = (datetime.now(last_used_date.tzinfo) - last_used_date).days
-                                      else:
-                                          active_key_age_days = None  # Key has never been used
+                                      # Calculate the key's age in days since its creation
+                                      key_age_days = (datetime.now(key['CreateDate'].tzinfo) - key['CreateDate']).days
 
-                                      # Check if the key is active and either unused or has exceeded the active key age threshold
-                                      if key['Status'] == 'Active' and (active_key_age_days is None or active_key_age_days >= threshold_days):
+                                      # Mark the key as non-compliant if its age exceeds the threshold
+                                      if key['Status'] == 'Active' and key_age_days >= threshold_days:
                                           non_compliant_keys.append({
                                               'UserName': user['UserName'],
                                               'AccessKeyId': key['AccessKeyId'],
-                                              'LastUsedDate': last_used_date.strftime('%Y-%m-%d') if last_used_date else 'Never Used',
-                                              'ActiveKeyAge': active_key_age_days if active_key_age_days is not None else 'Never Used',
-                                              'LastAssessedDate': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                              'CreationDate': key['CreateDate'].strftime('%Y-%m-%d'),
+                                              'KeyAgeDays': key_age_days
                                           })
 
-                          except ClientError as e:
-                              logger.error(f"Error retrieving access keys for user {user['UserName']}: {e}")
                           except Exception as e:
-                              logger.error(f"Unexpected error for user {user['UserName']}: {e}")
+                              logger.error(f"Error processing access keys for user {user['UserName']}: {e}")
 
                   # Report compliance status to AWS Config
                   compliance_type = 'NON_COMPLIANT' if non_compliant_keys else 'COMPLIANT'
@@ -142,9 +113,9 @@ Resources:
                               'Types': ['Software and Configuration Checks/AWS Security Best Practices'],
                               'CreatedAt': datetime.now().isoformat(),
                               'UpdatedAt': datetime.now().isoformat(),
-                              'Severity': {'Label': 'HIGH'},  # Set the severity to HIGH
+                              'Severity': {'Label': 'HIGH'},
                               'Title': 'IAM Access Key Rotation Best Practice Violation',
-                              'Description': f'Active IAM access key {key["AccessKeyId"]} for user {key["UserName"]} has not been used in over {threshold_days} days (Last Used: {key["LastUsedDate"]}).',
+                              'Description': f'Active IAM access key {key["AccessKeyId"]} for user {key["UserName"]} is older than 22 months (Key Age: {key["KeyAgeDays"]} days).',
                               'Resources': [
                                   {
                                       'Type': 'AwsIamAccessKey',
@@ -154,8 +125,7 @@ Resources:
                                   }
                               ],
                               'Compliance': {'Status': 'FAILED'},
-                              'RecordState': 'ACTIVE',
-                              'LastObservedAt': key['LastAssessedDate']
+                              'RecordState': 'ACTIVE'
                           })
                       securityhub_client.batch_import_findings(Findings=findings)
 
@@ -165,8 +135,6 @@ Resources:
                       'compliance_type': compliance_type
                   }
 
-              except (ClientError, BotoCoreError) as error:
-                  logger.error(f"AWS Error occurred: {error}")
               except Exception as e:
                   logger.error(f"General error occurred: {e}")
 
@@ -176,7 +144,7 @@ Resources:
     DependsOn: IAMAccessKeyRotationCheckFunction  # Ensures the Lambda function is created before the Config rule
     Properties:
       ConfigRuleName: IAMAccessKeyRotationCheckRule
-      Description: Detects IAM access keys that are active and older than 18 months.
+      Description: Detects IAM access keys that are active and older than 22 months.
       Source:
         Owner: CUSTOM_LAMBDA
         SourceIdentifier: !GetAtt IAMAccessKeyRotationCheckFunction.Arn
