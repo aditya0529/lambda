@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Custom AWS Config rule to detect IAM access keys older than 18 months and integrate with Security Hub.
+
+Resources:
+  # IAM Role for Lambda function with necessary permissions
+  IAMRoleForLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: IAMAccessKeyRotationCheckRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaIAMAccessKeyRotationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers         # Allows the Lambda to list IAM users.
+                  - iam:ListAccessKeys    # Allows the Lambda to list access keys for each user.
+                  - config:PutEvaluations # Allows the Lambda to report compliance status to AWS Config.
+                  - securityhub:BatchImportFindings # Allows the Lambda to send findings to AWS Security Hub.
+                  - logs:CreateLogGroup   # Allows the Lambda to create CloudWatch log groups.
+                  - logs:CreateLogStream  # Allows the Lambda to create CloudWatch log streams.
+                  - logs:PutLogEvents     # Allows the Lambda to write logs to CloudWatch.
+                Resource: '*'
+
+  # Lambda Function for evaluating IAM access keys
+  IAMAccessKeyRotationCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: IAMAccessKeyRotationCheckFunction
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt IAMRoleForLambda.Arn
+      Timeout: 300  # Set the timeout to handle large data processing
+      Code:
+        ZipFile: |
+          import boto3
+          import time
+          import logging
+          from datetime import datetime, timedelta
+          from botocore.exceptions import ClientError, BotoCoreError
+
+          # Initialize AWS clients for IAM, Config, and Security Hub
+          iam_client = boto3.client('iam')
+          config_client = boto3.client('config')
+          securityhub_client = boto3.client('securityhub')
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def call_with_backoff(func, *args, **kwargs):
+              retries = 5
+              backoff_time = 1
+              for attempt in range(retries):
+                  try:
+                      return func(*args, **kwargs)
+                  except ClientError as e:
+                      if e.response['Error']['Code'] == 'Throttling':
+                          logger.warning(f"Throttling error occurred, retrying in {backoff_time} seconds...")
+                          time.sleep(backoff_time)
+                          backoff_time *= 2  # Exponential backoff
+                      else:
+                          raise e  # Re-raise the error if it's not a rate-limiting issue
+              logger.error("Exceeded retry attempts due to throttling.")
+              raise e
+
+          def lambda_handler(event, context):
+              try:
+                  expiration_threshold = datetime.now() - timedelta(days=18 * 30)  # 18-month threshold
+                  non_compliant_keys = []  # List to store non-compliant access keys
+                  
+                  # Use paginator for listing all IAM users
+                  paginator = iam_client.get_paginator('list_users')
+                  for page in call_with_backoff(paginator.paginate):  # Use backoff for listing users
+                      users = page['Users']
+                      for user in users:
+                          try:
+                              # Use paginator for listing access keys for each user
+                              key_paginator = iam_client.get_paginator('list_access_keys')
+                              for key_page in call_with_backoff(key_paginator.paginate, UserName=user['UserName']):
+                                  access_keys = key_page['AccessKeyMetadata']
+                                  for key in access_keys:
+                                      key_age_days = (datetime.now(key['CreateDate'].tzinfo) - key['CreateDate']).days
+                                      
+                                      if key['Status'] == 'Active' and key['CreateDate'] <= expiration_threshold:
+                                          non_compliant_keys.append({
+                                              'UserName': user['UserName'],
+                                              'AccessKeyId': key['AccessKeyId'],
+                                              'CreateDate': key['CreateDate'].strftime('%Y-%m-%d'),
+                                              'KeyAge': key_age_days
+                                          })
+
+                          except ClientError as e:
+                              logger.error(f"Error retrieving access keys for user {user['UserName']}: {e}")
+                          except Exception as e:
+                              logger.error(f"Unexpected error for user {user['UserName']}: {e}")
+
+                  # Report compliance status to AWS Config
+                  compliance_type = 'NON_COMPLIANT' if non_compliant_keys else 'COMPLIANT'
+                  config_client.put_evaluations(
+                      Evaluations=[
+                          {
+                              'ComplianceResourceType': 'AWS::IAM::User',
+                              'ComplianceResourceId': 'IAMAccessKeyCheck',
+                              'ComplianceType': compliance_type,
+                              'OrderingTimestamp': datetime.now()
+                          },
+                      ],
+                      ResultToken=event.get('resultToken', 'NoTokenProvided')
+                  )
+
+                  # Send non-compliant findings to AWS Security Hub
+                  if non_compliant_keys:
+                      findings = []
+                      for key in non_compliant_keys:
+                          findings.append({
+                              'SchemaVersion': '2018-10-08',
+                              'Id': f'{key["UserName"]}/{key["AccessKeyId"]}',
+                              'ProductArn': f'arn:aws:securityhub:{context.invoked_function_arn.split(":")[3]}:aws:product/aws/securityhub',
+                              'GeneratorId': 'iam-access-key-rotation-check',
+                              'AwsAccountId': context.invoked_function_arn.split(":")[4],
+                              'Types': ['Software and Configuration Checks/AWS Security Best Practices'],
+                              'CreatedAt': datetime.now().isoformat(),
+                              'UpdatedAt': datetime.now().isoformat(),
+                              'Severity': {'Label': 'HIGH'},  # Set the severity to HIGH
+                              'Title': 'IAM Access Key Rotation Best Practice Violation',
+                              'Description': f'Active IAM access key {key["AccessKeyId"]} for user {key["UserName"]} is older than 18 months (Key Age: {key["KeyAge"]} days).',
+                              'Resources': [
+                                  {
+                                      'Type': 'AwsIamAccessKey',
+                                      'Id': key["AccessKeyId"],
+                                      'Partition': 'aws',
+                                      'Region': context.invoked_function_arn.split(":")[3]
+                                  }
+                              ],
+                              'Compliance': {'Status': 'FAILED'},
+                              'RecordState': 'ACTIVE'
+                          })
+                      securityhub_client.batch_import_findings(Findings=findings)
+
+                  logger.info(f"Compliance type reported: {compliance_type}")
+                  return {
+                      'statusCode': 200,
+                      'compliance_type': compliance_type
+                  }
+
+              except (ClientError, BotoCoreError) as error:
+                  logger.error(f"AWS Error occurred: {error}")
+              except Exception as e:
+                  logger.error(f"General error occurred: {e}")
+
+  # AWS Config Custom Rule to trigger the Lambda function
+  IAMAccessKeyRotationCheckRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: IAMAccessKeyRotationCheckRule
+      Description: Detects IAM access keys that are active and older than 18 months.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt IAMAccessKeyRotationCheckFunction.Arn
+      InputParameters: {}
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+Outputs:
+  LambdaFunctionName:
+    Description: The name of the Lambda function for IAM access key checks.
+    Value: !Ref IAMAccessKeyRotationCheckFunction
+
+  ConfigRuleName:
+    Description: The name of the AWS Config custom rule.
+    Value: !Ref IAMAccessKeyRotationCheckRule
