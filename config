@@ -1,0 +1,164 @@
+Updated CloudFormation Template
+I'll annotate the code to explain each section and change the Security Hub severity to "HIGH".
+
+yaml
+Copy code
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Custom AWS Config rule to detect IAM access keys older than 18 months and integrate with Security Hub.
+
+Resources:
+  # IAM Role for Lambda function with necessary permissions
+  IAMRoleForLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: IAMAccessKeyRotationCheckRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaIAMAccessKeyRotationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers         # Allows the Lambda to list IAM users.
+                  - iam:ListAccessKeys    # Allows the Lambda to list access keys for each user.
+                  - config:PutEvaluations # Allows the Lambda to report compliance status to AWS Config.
+                  - securityhub:BatchImportFindings # Allows the Lambda to send findings to AWS Security Hub.
+                Resource: '*'
+
+  # Lambda Function for evaluating IAM access keys
+  IAMAccessKeyRotationCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: IAMAccessKeyRotationCheckFunction
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt IAMRoleForLambda.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          from datetime import datetime, timedelta
+
+          # Initialize AWS clients for IAM, Config, and Security Hub
+          iam_client = boto3.client('iam')
+          config_client = boto3.client('config')
+          securityhub_client = boto3.client('securityhub')
+
+          def lambda_handler(event, context):
+              expiration_threshold = datetime.now() - timedelta(days=18 * 30) # Define the 18-month threshold for access keys
+              non_compliant_keys = [] # List to store non-compliant access keys
+
+              # List all IAM users in the account
+              users = iam_client.list_users()['Users']
+              for user in users:
+                  access_keys = iam_client.list_access_keys(UserName=user['UserName'])['AccessKeyMetadata']
+                  for key in access_keys:
+                      # Check if the key is active and older than 18 months
+                      if key['Status'] == 'Active' and key['CreateDate'] <= expiration_threshold:
+                          non_compliant_keys.append({
+                              'UserName': user['UserName'],
+                              'AccessKeyId': key['AccessKeyId'],
+                              'CreateDate': key['CreateDate'].strftime('%Y-%m-%d')
+                          })
+
+              # Determine compliance status based on detected non-compliant keys
+              compliance_type = 'NON_COMPLIANT' if non_compliant_keys else 'COMPLIANT'
+              config_client.put_evaluations(
+                  Evaluations=[
+                      {
+                          'ComplianceResourceType': 'AWS::IAM::User',
+                          'ComplianceResourceId': 'IAMAccessKeyCheck',
+                          'ComplianceType': compliance_type,
+                          'OrderingTimestamp': datetime.now()
+                      },
+                  ],
+                  ResultToken=event['resultToken']
+              )
+
+              # If there are non-compliant keys, send findings to Security Hub
+              if non_compliant_keys:
+                  findings = []
+                  for key in non_compliant_keys:
+                      findings.append({
+                          'SchemaVersion': '2018-10-08',
+                          'Id': f'{key["UserName"]}/{key["AccessKeyId"]}',
+                          'ProductArn': f'arn:aws:securityhub:{context.invoked_function_arn.split(":")[3]}:aws:product/aws/securityhub',
+                          'GeneratorId': 'iam-access-key-rotation-check',
+                          'AwsAccountId': context.invoked_function_arn.split(":")[4],
+                          'Types': ['Software and Configuration Checks/AWS Security Best Practices'],
+                          'CreatedAt': datetime.now().isoformat(),
+                          'UpdatedAt': datetime.now().isoformat(),
+                          'Severity': {'Label': 'HIGH'}, # Set the severity to HIGH as per best practices.
+                          'Title': 'IAM Access Key Rotation Best Practice Violation',
+                          'Description': f'Active IAM access key {key["AccessKeyId"]} for user {key["UserName"]} is older than 18 months.',
+                          'Resources': [
+                              {
+                                  'Type': 'AwsIamAccessKey',
+                                  'Id': key["AccessKeyId"],
+                                  'Partition': 'aws',
+                                  'Region': context.invoked_function_arn.split(":")[3]
+                              }
+                          ],
+                          'Compliance': {'Status': 'FAILED'},
+                          'RecordState': 'ACTIVE'
+                      })
+                  securityhub_client.batch_import_findings(Findings=findings)
+
+              return {
+                  'statusCode': 200,
+                  'compliance_type': compliance_type
+              }
+
+  # AWS Config Custom Rule to trigger the Lambda function
+  IAMAccessKeyRotationCheckRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: IAMAccessKeyRotationCheckRule
+      Description: Detects IAM access keys that are active and older than 18 months.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt IAMAccessKeyRotationCheckFunction.Arn
+      InputParameters: {}
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+Outputs:
+  LambdaFunctionName:
+    Description: The name of the Lambda function for IAM access key checks.
+    Value: !Ref IAMAccessKeyRotationCheckFunction
+  ConfigRuleName:
+    Description: The name of the AWS Config custom rule.
+    Value: !Ref IAMAccessKeyRotationCheckRule
+Explanation of the Code
+IAM Role for Lambda Function:
+
+This role is required by the Lambda function to interact with AWS services.
+Permissions include access to IAM operations, AWS Config evaluations, and Security Hub findings.
+Least privilege is used, so the role has only the necessary permissions.
+Lambda Function:
+
+The function lists all IAM users and checks each access key to see if it is active and older than 18 months.
+It uses the expiration_threshold to define the age limit for the access keys.
+If non-compliant keys are found, it marks the rule's compliance status as NON_COMPLIANT and reports this to AWS Config.
+Security Hub Integration:
+
+The findings are sent to AWS Security Hub using the batch_import_findings API.
+Severity Level is set to HIGH to reflect the importance of rotating access keys to maintain security.
+Findings include details such as the access key ID, user name, description, and resource information.
+AWS Config Custom Rule:
+
+This rule is defined as a custom Lambda rule.
+It triggers the Lambda function to run its evaluation at a frequency of TwentyFour_Hours (once a day).
+CloudFormation Outputs:
+
+Provides information about the created resources, such as the Lambda function name and the AWS Config rule name.
+Best Practices Followed
+Security Hub Severity: Updated the severity level to HIGH to reflect the critical nature of the security issue.
+IAM Permissions: Applied the principle of least privilege to limit permissions only to those required for the Lambda function.
+Modular Code Design: The code is structured in a clean and organized way for readability and maintainability.
+Automatic Security Hub Integration: Findings are automatically sent to Security Hub to ensure that security issues are immediately visible.
